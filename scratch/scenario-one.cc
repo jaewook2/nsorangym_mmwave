@@ -132,6 +132,33 @@ PrintPosition (Ptr<Node> node)
                                                              << Simulator::Now ().GetSeconds ());
 }
 
+void
+PrintPosition_ts (std::string filename, double poss_period)
+{
+  std::ofstream outFile;
+  outFile.open (filename.c_str (), std::ios_base::app);
+  if (!outFile.is_open ())
+    {
+      NS_LOG_ERROR ("Can't open file " << filename);
+      return;
+    }
+  for (NodeList::Iterator it = NodeList::Begin (); it != NodeList::End (); ++it)
+    {
+      Ptr<Node> node = *it;
+      int nDevs = node->GetNDevices ();
+      for (int j = 0; j < nDevs; j++)
+        {
+          Ptr<McUeNetDevice> mcuedev = node->GetDevice (j)->GetObject<McUeNetDevice> ();
+          if (mcuedev) {
+                  Vector pos = node->GetObject<MobilityModel> ()->GetPosition ();
+                  outFile << Simulator::Now ().GetSeconds ()<<","<< mcuedev->GetImsi () <<","<< pos.x << "," << pos.y << std::endl;
+                  //NS_LOG_UNCOND ("UE"<<mcuedev->GetImsi ()<<"Position " << pos << " at time " << Simulator::Now ().GetSeconds ());
+          }
+        }
+    }
+      Simulator::Schedule(MilliSeconds(poss_period), [=]() {PrintPosition_ts(filename, poss_period);});
+}
+
 static ns3::GlobalValue g_bufferSize ("bufferSize", "RLC tx buffer size (MB)",
                                       ns3::UintegerValue (10),
                                       ns3::MakeUintegerChecker<uint32_t> ());
@@ -777,6 +804,18 @@ main (int argc, char *argv[])
   //         Simulator::Schedule (Seconds (i * simTime / numPrints), &PrintPosition, ueNodes.Get (j));
   //       }
   //   }
+
+  // JLEE Traceing UE possitions
+    double poss_period = 100;
+    std::string filename = "ue_trace.txt";
+
+    std::ofstream outFile;
+    outFile.open(filename.c_str(), std::ios_base::out | std::ios_base::trunc);
+    outFile.close();  
+
+  // Schedule with lambda
+  Simulator::Schedule(MilliSeconds(poss_period), [=]() {PrintPosition_ts(filename, poss_period);});
+
 
   if (enableTraces)
   {
