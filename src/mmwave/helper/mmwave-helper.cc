@@ -3299,9 +3299,13 @@ MmWaveHelper::SetUeComponentCarrierManagerType(std::string type)
 uint64_t
 MmWaveHelper::GetStartTime()
 {
+    /*
     auto time_now = std::chrono::system_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(time_now.time_since_epoch());
     return duration.count();
+    */
+    // sync with sim time
+    return 0;
 }
 } // namespace mmwave
 } // namespace ns3
