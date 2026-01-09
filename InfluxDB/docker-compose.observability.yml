@@ -1,0 +1,40 @@
+version: '3.8'
+services:
+  influxdb:
+    image: influxdb:1.8-alpine
+    container_name: influxdb
+    env_file: configuration.env
+    ports:
+      - '8086:8086'
+    volumes:
+      - ./:/imports
+      - influxdb_data:/var/lib/influxdb
+    networks:
+      observability-net:
+        aliases: [influxdb]
+  
+  grafana:
+    image: grafana/grafana:8.0.2
+    container_name: grafana
+    depends_on:
+      - influxdb
+    env_file: configuration.env
+    links:
+      - influxdb
+    ports:
+      - '3000:3000'
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+      - ./grafana/dashboards/:/var/lib/grafana/dashboards/
+    networks:
+      observability-net:
+        aliases: [grafana]
+
+volumes:
+  grafana_data: {}
+  influxdb_data: {}
+
+networks:
+  observability-net:
+    external: true

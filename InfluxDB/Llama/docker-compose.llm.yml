@@ -1,0 +1,43 @@
+version: "3.8"
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    # GPU 쓰려면 주석 해제
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - capabilities: [gpu]
+
+  agent:
+    build: ./agent
+    container_name: llama-influx-agent
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      #- INFLUX_HOST=host.docker.internal
+      - INFLUX_HOST=influxdb      # ← 이걸로!
+
+      - INFLUX_PORT=8086
+      - INFLUX_USER=admin
+      - INFLUX_PASS=admin
+      - INFLUX_DB=influx
+    depends_on:
+      - ollama
+   # extra_hosts:
+   #   - "host.docker.internal:host-gateway"   # 호스트 InfluxDB 접근용
+    tty: true
+    networks:
+      observability-net:
+        aliases: [llama-influx-agent]
+
+volumes:
+  ollama: {}
+
+networks:
+  observability-net:
+    external: true
