@@ -160,11 +160,22 @@ PrintPosition (Ptr<Node> node)
                 << Simulator::Now().GetSeconds());
 }
 
+
 void
 PrintPosition_ts (std::string filename, double poss_period)
 {
+
   std::ofstream outFile;
-  outFile.open (filename.c_str (), std::ios_base::app);
+  static bool firstWrite = true;
+
+    if (firstWrite) {
+      outFile.open(filename.c_str(), std::ios_base::trunc);  // 기존 삭제
+      outFile << "timestamp,ueImsiComplete,position_x,position_y\n"; // 헤더
+      firstWrite = false;
+  } else {
+      outFile.open(filename.c_str(), std::ios_base::app);
+  }
+
   if (!outFile.is_open ())
     {
       NS_LOG_ERROR ("Can't open file " << filename);

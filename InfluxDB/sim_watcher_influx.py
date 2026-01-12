@@ -18,7 +18,7 @@ lock = threading.Lock()
 
 class SimWatcher(PatternMatchingEventHandler):
     # 감시 파일 패턴
-    patterns = ['cu-up-cell-*.txt', 'cu-cp-cell-*.txt', "du-cell-*.txt", 'ue_positions.txt']
+    patterns = ['cu-up-cell-*.txt', 'cu-cp-cell-*.txt', "du-cell-*.txt", 'ue_trace.txt']
 
     # KPM 저장
     kpm_map: Dict[Tuple[float, int, int], List] = {}
@@ -47,7 +47,7 @@ class SimWatcher(PatternMatchingEventHandler):
         )
         self.write_api = self.client.write_api(write_options=SYNCHRONOUS)
 
-        print("✅ Start Watchdog (InfluxDB 2.x)...")
+        print(" Start Watchdog (InfluxDB 2.x)...")
         print(f" - Watch directory: {directory}")
         print(f" - Influx URL: {self.influx_url}")
         print(f" - Org: {self.influx_org}, Bucket: {self.influx_bucket}")
@@ -63,7 +63,7 @@ class SimWatcher(PatternMatchingEventHandler):
                 # ---------------------------
                 # UE 위치 파일
                 # ---------------------------
-                if fname == 'ue_positions.txt':
+                if fname == 'ue_trace.txt':
                     reader = csv.DictReader(file)
                     self._send_positions_to_influx(reader)
                     return
@@ -130,7 +130,7 @@ class SimWatcher(PatternMatchingEventHandler):
 
                     self.consumed_keys.add(key)
 
-                    print("✅ Write received KPM data to InfluxDB 2.x")
+                    print("Write received KPM data to InfluxDB 2.x")
                     self._send_kpm_to_influxdb(
                         ue=ue,
                         serv_cellid=str(cellid),
@@ -158,8 +158,9 @@ class SimWatcher(PatternMatchingEventHandler):
         file_id_number: str
     ):
         # InfluxDB 2.x: nanoseconds
-        timestamp_ns = int(timestamp_s * 1e9)
-
+        #timestamp_ns = int(timestamp_s * 1e9)
+        timestamp_ns = int(time.time() * 1e9)
+        
         points: List[Point] = []
 
         i = 0
@@ -207,8 +208,8 @@ class SimWatcher(PatternMatchingEventHandler):
                     .tag("file_type", str(file_type))
                     .tag("file_id_number", str(file_id_number))
                     .field("value", float(values[i]))
-                    .time(timestamp_ns)
-                )
+                    .field("sim_t", timestamp_s)                 # 시뮬레이션 시간(초)도 같이 저장(추천)
+                    .time(timestamp_ns)                )
                 points.append(p)
                 i += 1
                 continue
@@ -231,6 +232,7 @@ class SimWatcher(PatternMatchingEventHandler):
                 .tag("file_type", str(file_type))
                 .tag("file_id_number", str(file_id_number))
                 .field("value", float(values[i]))
+                .field("sim_t", timestamp_s)                 # 시뮬레이션 시간(초)도 같이 저장(추천)
                 .time(timestamp_ns)
             )
             points.append(p)
@@ -250,6 +252,7 @@ class SimWatcher(PatternMatchingEventHandler):
                     .tag("file_type", str(file_type))
                     .tag("file_id_number", str(file_id_number))
                     .field("value", float(values[i]))
+                    .field("sim_t", timestamp_s)                 # 시뮬레이션 시간(초)도 같이 저장(추천)
                     .time(timestamp_ns)
                 )
                 points.append(p2)
@@ -271,27 +274,29 @@ class SimWatcher(PatternMatchingEventHandler):
             if not row.get('timestamp') or not row.get('ueImsiComplete'):
                 continue
             try:
-                ts = float(row['timestamp'])
+                timestamp_s = float(row['timestamp'])
                 ue = str(row['ueImsiComplete']).strip()
                 x = float(row['position_x'])
                 y = float(row['position_y'])
             except Exception:
                 continue
 
-            timestamp_ns = int(ts * 1e9)
+            #timestamp_ns = int(timestamp_s * 1e9)
+            timestamp_ns = int(time.time() * 1e9)
 
             p = (
                 Point("UE_Position")
                 .tag("ue", ue)
                 .field("x", x)
                 .field("y", y)
+                .field("sim_t", timestamp_s)                 # 시뮬레이션 시간(초)도 같이 저장(추천)
                 .time(timestamp_ns)
             )
             points.append(p)
 
         if points:
             self.write_api.write(bucket=self.influx_bucket, org=self.influx_org, record=points)
-            print(f"✅ Wrote {len(points)} UE positions to InfluxDB 2.x")
+            print(f"Wrote {len(points)} UE positions to InfluxDB 2.x")
 
 
 if __name__ == "__main__":
