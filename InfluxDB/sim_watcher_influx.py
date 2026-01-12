@@ -1,46 +1,56 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import csv
 from typing import Dict, List, Set, Tuple
-import numpy as np
 from watchdog.events import PatternMatchingEventHandler
 from watchdog.observers import Observer
 import threading
 import re
 import os
 import time
-from influxdb import InfluxDBClient
+
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS
 
 lock = threading.Lock()
 
 
 class SimWatcher(PatternMatchingEventHandler):
-    patterns = ['cu-up-cell-*.txt', 'cu-cp-cell-*.txt', "du-cell-*.txt",  'ue_positions.txt']
-    kpm_map: Dict[Tuple[int, int, int], List] = {}
-    consumed_keys: Set[Tuple[int, int, int]]
-    influx_host = "localhost"
-    influx_port = 8086
-    influx_user = 'admin'
-    influx_password = 'admin'
-    db_name = 'influx'
+    # 감시 파일 패턴
+    patterns = ['cu-up-cell-*.txt', 'cu-cp-cell-*.txt', "du-cell-*.txt", 'ue_positions.txt']
 
-    client = InfluxDBClient(
-        host=influx_host,
-        port=influx_port,
-        username=influx_user,
-        password=influx_password,
-        database=db_name)
+    # KPM 저장
+    kpm_map: Dict[Tuple[float, int, int], List] = {}
 
-    client.create_database(db_name)
-
-    def __init__(self, directory):
-        PatternMatchingEventHandler.__init__(self, patterns=self.patterns,
-                                             ignore_patterns=[],
-                                             ignore_directories=True, case_sensitive=False)
+    def __init__(self, directory: str):
+        super().__init__(
+            patterns=self.patterns,
+            ignore_patterns=[],
+            ignore_directories=True,
+            case_sensitive=False
+        )
         self.directory = directory
-        self.consumed_keys = set()
-        print("Start Watchdog....")
+        self.consumed_keys: Set[Tuple[float, int, int]] = set()
 
-    def on_created(self, event):
-        super().on_created(event)
+        # ========== InfluxDB 2.x ENV ==========
+        self.influx_url = os.getenv("INFLUX_URL", "http://influxdb:8086")
+        self.influx_token = os.getenv("INFLUX_TOKEN", "mytoken")
+        self.influx_org = os.getenv("INFLUX_ORG", "oran")
+        self.influx_bucket = os.getenv("INFLUX_BUCKET", "ns3")
+
+        # InfluxDB 2.x 클라이언트
+        self.client = InfluxDBClient(
+            url=self.influx_url,
+            token=self.influx_token,
+            org=self.influx_org
+        )
+        self.write_api = self.client.write_api(write_options=SYNCHRONOUS)
+
+        print("✅ Start Watchdog (InfluxDB 2.x)...")
+        print(f" - Watch directory: {directory}")
+        print(f" - Influx URL: {self.influx_url}")
+        print(f" - Org: {self.influx_org}, Bucket: {self.influx_bucket}")
 
     def on_modified(self, event):
         super().on_modified(event)
@@ -48,95 +58,130 @@ class SimWatcher(PatternMatchingEventHandler):
         lock.acquire()
         try:
             with open(event.src_path, 'r') as file:
-                if os.path.basename(file.name) == 'ue_positions.txt':
+                fname = os.path.basename(file.name)
+
+                # ---------------------------
+                # UE 위치 파일
+                # ---------------------------
+                if fname == 'ue_positions.txt':
                     reader = csv.DictReader(file)
                     self._send_positions_to_influx(reader)
                     return
-                
-                
+
+                # ---------------------------
+                # KPM 로그 파일
+                # ---------------------------
                 reader = csv.DictReader(file)
                 for row in reader:
-                    timestamp = float(row['timestamp'])
-                    ue_imsi = int(row['ueImsiComplete'])
-                    ue = row['ueImsiComplete']
-                    Fnames = file.name.replace('.txt', '')
-                    Fnames = Fnames.split('-')
+                    if not row:
+                        continue
+
+                    try:
+                        timestamp = float(row['timestamp'])
+                        ue_imsi = int(row['ueImsiComplete'])
+                        ue = str(row['ueImsiComplete']).strip()
+                    except Exception:
+                        continue
+
+                    # 파일명에서 cell id 파싱
+                    # 예: cu-up-cell-2.txt → 2
+                    Fnames = file.name.replace('.txt', '').split('-')
                     cellid = Fnames[-1]
 
+                    # file_type 결정 (기존 로직 그대로)
                     if re.search('cu-up-cell-[2-8].txt', file.name):
                         key = (timestamp, ue_imsi, 0)
-                    if re.search('cu-cp-cell-[2-8].txt', file.name):
+                    elif re.search('cu-cp-cell-[2-8].txt', file.name):
                         key = (timestamp, ue_imsi, 1)
-                    if re.search('du-cell-[2-8].txt', file.name):
+                    elif re.search('du-cell-[2-8].txt', file.name):
                         key = (timestamp, ue_imsi, 2)
-                    if re.search('cu-up-cell-1.txt', file.name):
-                        key = (timestamp, ue_imsi, 3)  # to see data for eNB cell
-                    if re.search('cu-cp-cell-1.txt', file.name):
-                        key = (timestamp, ue_imsi, 4)  # same here
+                    elif re.search('cu-up-cell-1.txt', file.name):
+                        key = (timestamp, ue_imsi, 3)
+                    elif re.search('cu-cp-cell-1.txt', file.name):
+                        key = (timestamp, ue_imsi, 4)
+                    else:
+                        continue
 
-                    if key not in self.consumed_keys:
-                        if key not in self.kpm_map:
-                            self.kpm_map[key] = []
+                    # 중복 방지
+                    if key in self.consumed_keys:
+                        continue
 
-                        fields = list()
+                    if key not in self.kpm_map:
+                        self.kpm_map[key] = []
 
-                        for column_name in reader.fieldnames:
-                            if row[column_name] == '':
-                                continue
-                            self.kpm_map[key].append(float(row[column_name]))
-                            fields.append(column_name) # column_name : insert
+                    fields = []
+                    values = []
 
-                        regex = re.search(r"\w*-(\d+)\.txt", file.name)
-                        fields.append('file_id_number')
-                        self.kpm_map[key].append(regex.group(1))  # last item of list will be file_id_number
+                    # fieldnames 처리
+                    for column_name in reader.fieldnames:
+                        if column_name not in row:
+                            continue
+                        if row[column_name] == '':
+                            continue
+                        try:
+                            values.append(float(row[column_name]))
+                            fields.append(column_name)
+                        except Exception:
+                            continue
 
-                        self.consumed_keys.add(key)
-                        print("Write the recived data at xAPP to Influx DB")
-                        self._send_to_influxDB(ue=ue, serv_cellid = cellid, values=self.kpm_map[key], fields=fields, file_type=key[2])
+                    # file id number
+                    regex = re.search(r"\w*-(\d+)\.txt", file.name)
+                    file_id_number = regex.group(1) if regex else "0"
+
+                    self.consumed_keys.add(key)
+
+                    print("✅ Write received KPM data to InfluxDB 2.x")
+                    self._send_kpm_to_influxdb(
+                        ue=ue,
+                        serv_cellid=str(cellid),
+                        timestamp_s=timestamp,
+                        values=values,
+                        fields=fields,
+                        file_type=key[2],
+                        file_id_number=file_id_number
+                    )
+
         finally:
             lock.release()
 
-    def on_closed(self, event):
-        super().on_closed(event)
+    # ---------------------------
+    # KPM Write (InfluxDB 2.x)
+    # ---------------------------
+    def _send_kpm_to_influxdb(
+        self,
+        ue: str,
+        serv_cellid: str,
+        timestamp_s: float,
+        values: List[float],
+        fields: List[str],
+        file_type: int,
+        file_id_number: str
+    ):
+        # InfluxDB 2.x: nanoseconds
+        timestamp_ns = int(timestamp_s * 1e9)
 
-    def _send_to_influxDB(self, ue: int, serv_cellid: int, values: List, fields: List, file_type: int):
-        # convert timestamp in nanoseconds (InfluxDB)
-        timestamp = int(values[0] * (pow(10, 6)))
+        points: List[Point] = []
 
         i = 0
-        influx_points = []
-        cellId = '0'
-        # 한줄씩 처리 ==> UE_ID,
+        cellId = "0"
 
         for field in fields:
-            stat = field # field Name
-            if field == 'file_id_number':
-                continue
+            stat = field
 
             # convert pdcp_latency
             if field == 'DRB.PdcpSduDelayDl.UEID (pdcpLatency)':
                 values[i] = values[i] * pow(10, -1)
 
-            # UETrace
-            # SINR 처리 : SINR_cell_a_ue_b, Serv_SINR_cell_a_ue_b
-            ### L3 serving SINR,L3 neigh SINR #
-            # 3GPP-SINR 처리 : 3GPP_SINR_cell_a_ue_b, Serv_3GPP_SINR_cell_a_ue_b
-            ### L3 serving SINR 3gpp ,L3 neigh SINR 3gpp # (convertedSinr)
-            # Serving Cell ID UE :Serv_Cellid_ue_b
-            ### L3 serving Id(m_cellId)
-
-            # Cell Trace
-            # numActive UEs
-            #
             servecell = False
+
+            # cellId tracking
             if 'L3' in field and 'cellId' in field:
-                cellId = values[i]
+                cellId = str(int(values[i]))
 
             if 'L3 serving Id(m_cellId)' in field:
                 stat = 'Serv_Cellid_ue_'
 
             elif 'L3 serving SINR' in field and '3gpp' not in field:
-                #stat = stat + '_cell_' + str(int(cellId))
                 stat = 'SINR_cell_' + str(int(cellId))
                 stat_serv = 'Serv_SINR_cell_' + str(int(cellId))
                 servecell = True
@@ -145,7 +190,6 @@ class SimWatcher(PatternMatchingEventHandler):
                 stat = 'SINR_cell_' + str(int(cellId))
 
             elif 'L3 serving SINR 3gpp' in field:
-                # stat = stat + '_cell_' + str(int(cellId))
                 stat = '3GPP_SINR_cell_' + str(int(cellId))
                 stat_serv = '3GPP_Serv_SINR_cell_' + str(int(cellId))
                 servecell = True
@@ -153,104 +197,107 @@ class SimWatcher(PatternMatchingEventHandler):
             elif 'L3 neigh SINR 3gpp' in field:
                 stat = '3GPP_SINR_cell_' + str(int(cellId))
 
+            # -------------------------
+            # Cell trace (UEID / L3 제외)
+            # -------------------------
             if 'UEID' not in field and 'L3' not in field:
-                # Cell num
-                stat = field + '_cell_' + serv_cellid
-                stat = stat.replace(' ', '')
-                influx_point = {
-                    "measurement": stat,
-                    "tags": {
-                        'timestamp': timestamp
-                    },
-                    "fields": {
-                        "value": values[i]
-                    }
-                }
-                influx_points.append(influx_point)
+                stat = (field + '_cell_' + serv_cellid).replace(' ', '')
+                p = (
+                    Point(stat)
+                    .tag("file_type", str(file_type))
+                    .tag("file_id_number", str(file_id_number))
+                    .field("value", float(values[i]))
+                    .time(timestamp_ns)
+                )
+                points.append(p)
                 i += 1
                 continue
 
-            stat = stat + '_ue_' + ue
-            if file_type == 0 or file_type == 3:
+            # -------------------------
+            # UE trace
+            # -------------------------
+            stat = (stat + '_ue_' + ue).replace(' ', '')
+
+            if file_type in (0, 3):
                 stat += '_up'
-            if file_type == 1 or file_type == 4:
+            elif file_type in (1, 4):
                 stat += '_cp'
-            if file_type == 2:
+            elif file_type == 2:
                 stat += '_du'
-            stat = stat.replace(' ', '')
-            print(stat)
 
-            influx_point = {
-                "measurement": stat,
-                "tags": {
-                    'timestamp': timestamp
-                },
-                "fields": {
-                    "value": values[i]
-                }
-            }
+            p = (
+                Point(stat)
+                .tag("serv_cellid", str(serv_cellid))
+                .tag("file_type", str(file_type))
+                .tag("file_id_number", str(file_id_number))
+                .field("value", float(values[i]))
+                .time(timestamp_ns)
+            )
+            points.append(p)
 
-            influx_points.append(influx_point)
             if servecell:
-                stat_serv = stat_serv + '_ue_' + ue
-                if file_type == 0 or file_type == 3:
+                stat_serv = (stat_serv + '_ue_' + ue).replace(' ', '')
+                if file_type in (0, 3):
                     stat_serv += '_up'
-                if file_type == 1 or file_type == 4:
+                elif file_type in (1, 4):
                     stat_serv += '_cp'
-                if file_type == 2:
+                elif file_type == 2:
                     stat_serv += '_du'
-                stat_serv = stat_serv.replace(' ', '')
-                influx_point = {
-                    "measurement": stat_serv,
-                    "tags": {
-                        'timestamp': timestamp
-                    },
-                    "fields": {
-                        "value": values[i]
-                    }
-                }
-                influx_points.append(influx_point)
+
+                p2 = (
+                    Point(stat_serv)
+                    .tag("serv_cellid", str(serv_cellid))
+                    .tag("file_type", str(file_type))
+                    .tag("file_id_number", str(file_id_number))
+                    .field("value", float(values[i]))
+                    .time(timestamp_ns)
+                )
+                points.append(p2)
 
             i += 1
-        # pipe.send()
-        self.client.write_points(influx_points)
 
+        # write
+        if points:
+            self.write_api.write(bucket=self.influx_bucket, org=self.influx_org, record=points)
+
+    # ---------------------------
+    # UE Position Write (InfluxDB 2.x)
+    # ---------------------------
     def _send_positions_to_influx(self, reader: csv.DictReader):
-        points = []
+        points: List[Point] = []
+
         for row in reader:
-            # 헤더는 정확히: timestamp, ueImsiComplete, position_x, position_y
+            # 헤더는: timestamp, ueImsiComplete, position_x, position_y
             if not row.get('timestamp') or not row.get('ueImsiComplete'):
                 continue
             try:
-                ts = float(row['timestamp'])           # ns-3에서 seconds로 찍었으면 float seconds
+                ts = float(row['timestamp'])
                 ue = str(row['ueImsiComplete']).strip()
                 x = float(row['position_x'])
                 y = float(row['position_y'])
             except Exception:
-                continue  # 파싱 실패한 라인 스킵
+                continue
 
-            points.append({
-                "measurement": "UE_Position",
-                "tags": {
-                    "ue": ue
-                },
-                # InfluxDB 1.x: time 필드 + time_precision='n' 로 ns 단위 기록
-                "time": int(ts * 1e9),
-                "fields": {
-                    "x": x,
-                    "y": y
-                }
-            })
+            timestamp_ns = int(ts * 1e9)
+
+            p = (
+                Point("UE_Position")
+                .tag("ue", ue)
+                .field("x", x)
+                .field("y", y)
+                .time(timestamp_ns)
+            )
+            points.append(p)
 
         if points:
-            # ns 단위
-            self.client.write_points(points, time_precision='n')
-            print(f"Wrote {len(points)} UE positions to InfluxDB")
-        
-        
+            self.write_api.write(bucket=self.influx_bucket, org=self.influx_org, record=points)
+            print(f"✅ Wrote {len(points)} UE positions to InfluxDB 2.x")
+
+
 if __name__ == "__main__":
-    directory = '/home/ionlab/nsorangym_mmwave/' ## replace with your directory to watch
+    directory = os.getenv("WATCH_DIR", "/workspace/ns3-mmwave-oran/")
     event_handler = SimWatcher(directory)
+
     observer = Observer()
     observer.schedule(event_handler, directory, recursive=False)
     observer.start()
