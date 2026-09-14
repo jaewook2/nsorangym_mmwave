@@ -94,6 +94,15 @@ class MmWaveEnbNetDevice : public MmWaveNetDevice
 
     Ptr<MmWaveEnbMac> GetMac(uint8_t index);
 
+    void SetAsmMode(uint8_t mode);
+    uint8_t GetAsmMode() const;
+    /**
+     * [nsoran-asm] Read ControlFileNameAsm CSV and apply/schedule ASM updates.
+     * Format: timestampMs,cellId,asmMode  (cellId 0 = this cell)
+     * or timestampMs,asmMode for this cell only.
+     */
+    void ReadAsmControlFile();
+
     void SetRrc(Ptr<LteEnbRrc> rrc);
 
     Ptr<LteEnbRrc> GetRrc(void);
@@ -107,6 +116,8 @@ class MmWaveEnbNetDevice : public MmWaveNetDevice
     void BuildAndSendReportMessage(E2Termination::RicSubscriptionRequest_rval_s params);
 
     void KpmSubscriptionCallback(E2AP_PDU_t* sub_req_pdu);
+
+    static void RecvGymControlReady(Ptr<MmWaveEnbNetDevice> netDev, std::string context);
 
     /**
      * @brief Turn the Cell On
@@ -201,6 +212,19 @@ class MmWaveEnbNetDevice : public MmWaveNetDevice
     uint16_t m_cellId; /* Cell Identifer. To uniquely identify an E-nodeB  */
 
     uint8_t m_Bandwidth; /* bandwidth in RBs (?) */
+
+    uint8_t m_asmMode = 1;
+    std::string m_asmControlFilename;
+    bool m_scheduleAsmControl = true;
+    bool m_flushAsmControlFile = false;
+    double m_asmControlPeriodicity = 0.1;
+
+    void ApplyAsmToSchedulers();
+    void ApplyAsmControlFile();
+    void ApplyAsmTurnOff();
+    void ApplyAsmTurnOn();
+    Ptr<LteEnbRrc> FindMasterLteRrc() const;
+    void LogAsmModeChange(uint8_t oldMode, uint8_t newMode);
 
     Ptr<LteEnbComponentCarrierManager>
         m_componentCarrierManager; ///< the component carrier manager of this eNb

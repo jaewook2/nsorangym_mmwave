@@ -74,9 +74,20 @@ class MmWaveMacScheduler : public Object
 
     virtual MmWaveMacCschedSapProvider* GetMacCschedSapProvider() = 0;
 
+    /**
+     * [nsoran-asm] ASM 1=100% data, 2=75%, 3=50%, 4=25%, 5=0% of data OFDM
+     * symbols from the start of the data region. DL/UL CTRL symbols stay on.
+     * ASM 6 = ES TurnOff: no data, HO barred, evict to another mmWave or LTE.
+     */
+    void SetAsmMode(uint8_t mode);
+    uint8_t GetAsmMode() const;
+    int GetAvailableDataSymbols() const;
+    static double AsmDutyCycle(uint8_t mode);
+
   protected:
     Ptr<MmWavePhyMacCommon> m_phyMacConfig;
     uint32_t m_rbgSize; // RBs per RB group for res alloc type 0
+    uint8_t m_asmMode;
 };
 
 } // namespace mmwave

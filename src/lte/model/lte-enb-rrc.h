@@ -1646,11 +1646,38 @@ class LteEnbRrc : public Object
      * @returns a map containing cellId, and a bool (true if cell is ON, otherwise false)
     */
     std::map<uint16_t, bool> GetAllowHandoverTo();
+    /**
+     * Unknown cells are treated as ON so TS-only (all cells allowed) is unchanged.
+     */
+    bool IsHandoverAllowedTo(uint16_t cellId) const;
+    /**
+     * Best allowed mmWave/NR cell for this UE by L3 SINR (same metric as ES eviction).
+     * @returns 0 if none
+     */
+    uint16_t GetBestAllowedMmWaveCell(uint64_t imsi) const;
+    /**
+     * TS target vs hoAllowed:
+     * 1. requested cell ON -> HO there
+     * 2. requested OFF, serving ON -> stay
+     * 3. requested OFF, serving OFF -> best allowed cell
+     */
+    uint16_t ResolveTsHandoverTarget(uint64_t imsi, uint16_t requestedTarget) const;
+    uint16_t GetLastMmWaveCell(uint64_t imsi) const;
 
     /**
-     * Evict users from secondary cells that have deactivated forcing handover to another cell
+     * Evict users from secondary cells that have deactivated.
+     * If another allowed mmWave exists, HO there. Otherwise switch user-plane to LTE.
+     * skipImsis: UEs already given a TS HO this round (avoid a second eviction HO).
      */
-    void EvictUsersFromSecondaryCell();
+    void EvictUsersFromSecondaryCell(const std::set<uint64_t>& skipImsis = {});
+    /**
+     * [nsoran-asm] PDCP switch to LTE when no allowed mmWave remains.
+     */
+    void SwitchUeDataToLte(uint64_t imsi);
+    /**
+     * [nsoran-asm] After ASM 6->1..5, resume UEs that fell back to LTE on this cell.
+     */
+    void ResumeUesFromLteToMmWaveCell(uint16_t cellId);
 
   private:
     /**

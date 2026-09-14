@@ -207,6 +207,8 @@ class McEnbPdcp : public LtePdcp
      * The parameters are RNTI, LCID and bytes delivered
      */
     TracedCallback<uint16_t, uint8_t, uint32_t> m_txPdu;
+    TracedCallback<uint16_t, uint8_t, uint32_t> m_txPduToLte;
+    TracedCallback<uint16_t, uint8_t, uint32_t> m_txPduToMmWave;
     /**
      * Used to inform of a PDU reception from the RLC SAP user.
      * The parameters are RNTI, LCID, bytes delivered and delivery delay in nanoseconds.

@@ -724,8 +724,7 @@ MmWaveFlexTtiMacScheduler::DoSchedTriggerReq(
     dlCtrlSlot.m_dci.m_numSym = 1;
     dlCtrlSlot.m_dci.m_symStart = 0;
     ret.m_slotAllocInfo.m_ttiAllocInfo.push_back(dlCtrlSlot);
-    int resvCtrl = m_phyMacConfig->GetDlCtrlSymbols() + m_phyMacConfig->GetUlCtrlSymbols();
-    int symAvail = m_phyMacConfig->GetSymbPerSlot() - resvCtrl;
+    int symAvail = GetAvailableDataSymbols();
     uint8_t ttiIdx = 1;
     uint8_t symIdx =
         m_phyMacConfig->GetDlCtrlSymbols(); // symbols reserved for control at beginning of subframe

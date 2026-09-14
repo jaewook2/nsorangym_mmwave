@@ -102,6 +102,14 @@ McEnbPdcp::GetTypeId(void)
                             "PDU transmission notified to the RLC.",
                             MakeTraceSourceAccessor(&McEnbPdcp::m_txPdu),
                             "ns3::McEnbPdcp::PduTxTracedCallback")
+            .AddTraceSource("TxPduToLte",
+                            "[nsoran-asm] PDCP SDU sent on the LTE user-plane.",
+                            MakeTraceSourceAccessor(&McEnbPdcp::m_txPduToLte),
+                            "ns3::McEnbPdcp::PduTxTracedCallback")
+            .AddTraceSource("TxPduToMmWave",
+                            "[nsoran-asm] PDCP SDU sent on the mmWave user-plane.",
+                            MakeTraceSourceAccessor(&McEnbPdcp::m_txPduToMmWave),
+                            "ns3::McEnbPdcp::PduTxTracedCallback")
             .AddTraceSource("RxPDU",
                             "PDU received.",
                             MakeTraceSourceAccessor(&McEnbPdcp::m_rxPdu),
@@ -219,6 +227,7 @@ McEnbPdcp::DoTransmitPdcpSduLTE(Ptr<Packet> p, LteRlcSapProvider::TransmitPdcpPd
     PdcpTag pdcpTag(Simulator::Now());
     p->AddByteTag(pdcpTag);
     m_txPdu(m_rnti, m_lcid, p->GetSize());
+    m_txPduToLte(m_rnti, m_lcid, p->GetSize());
     params.pdcpPdu = p;
 
     NS_LOG_LOGIC("Params.rnti " << params.rnti);
@@ -236,6 +245,7 @@ McEnbPdcp::DoTransmitPdcpSduMmWave(Ptr<Packet> p)
                      << m_ueDataParams.targetCellId);
     m_ueDataParams.ueData = p;
     m_txPdu(m_rnti, m_lcid, p->GetSize());
+    m_txPduToMmWave(m_rnti, m_lcid, p->GetSize());
     m_epcX2PdcpProvider->SendMcPdcpPdu(m_ueDataParams);
 }
 

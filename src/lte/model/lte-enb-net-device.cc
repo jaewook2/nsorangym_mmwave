@@ -58,6 +58,9 @@
 #include <ns3/lte-indication-message-helper.h>
 #include <ns3/lte-net-device.h>
 #include <ns3/lte-radio-bearer-info.h>
+#include <ns3/lte-rlc-am.h>
+#include <ns3/lte-rlc-um.h>
+#include <ns3/lte-rlc-um-lowlat.h>
 #include <ns3/lte-ue-net-device.h>
 #include <ns3/mc-enb-pdcp.h>
 #include <ns3/node.h>
@@ -71,10 +74,15 @@
 #include <ns3/trace-source-accessor.h>
 #include <ns3/uinteger.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
+#include <cmath>
 #include <fstream>
 #include <numeric>
 #include <sstream>
+#include <unordered_map>
+#include <vector>
 
 namespace ns3
 {
@@ -128,251 +136,365 @@ void
 LteEnbNetDevice::ReadControlFile()
 {
     NS_LOG_INFO(Simulator::Now().GetMilliSeconds()
-                << " I will try to read the control file " << m_controlFilename);
-    // Open the control file and read control commands
-    if (m_controlFilename != "")
+                << " I will try to read the control file " << m_controlFilename << " mode "
+                << m_controlMode);
+    std::string mode = NormalizeControlMode();
+    bool hasControl = (m_controlFilename != "") || !mode.empty();
+    if (!hasControl)
     {
-        if (m_useSemaphores)
+        return;
+    }
+
+    if (m_useSemaphores)
+    {
+        sem_t* metricsReadySemaphore = sem_open(m_metricsReadySemaphoreName.c_str(), 0);
+        NS_ABORT_MSG_IF(metricsReadySemaphore == SEM_FAILED,
+                        "Error in opening the metrics semaphore, errno: " << strerror(errno));
+
+        if (sem_post(metricsReadySemaphore) == -1)
         {
-            sem_t* metricsReadySemaphore = sem_open(m_metricsReadySemaphoreName.c_str(), 0);
-            NS_ABORT_MSG_IF(metricsReadySemaphore == SEM_FAILED,
-                            "Error in opening the metrics semaphore, errno: " << strerror(errno));
-
-            // Signal that metrics are ready
-            if (sem_post(metricsReadySemaphore) == -1)
-            {
-                NS_FATAL_ERROR("Error post named metrics semaphore: " << strerror(errno));
-            }
-
-            sem_close(metricsReadySemaphore);
-            metricsReadySemaphore = nullptr;
-
-            sem_t* controlSemaphore = sem_open(m_controlSemaphoreName.c_str(), 0);
-            NS_ABORT_MSG_IF(controlSemaphore == SEM_FAILED,
-                            "Error in opening the control semaphore, errno: " << strerror(errno));
-
-            if (sem_wait(controlSemaphore) == -1)
-            {
-                NS_FATAL_ERROR("Error wait control control semaphore: " << strerror(errno));
-            }
-
-            sem_close(controlSemaphore);
-            controlSemaphore = nullptr;
+            NS_FATAL_ERROR("Error post named metrics semaphore: " << strerror(errno));
         }
 
-        // open the control file and read handover commands
-        if (m_controlFilename != "")
+        sem_close(metricsReadySemaphore);
+        metricsReadySemaphore = nullptr;
+
+        sem_t* controlSemaphore = sem_open(m_controlSemaphoreName.c_str(), 0);
+        NS_ABORT_MSG_IF(controlSemaphore == SEM_FAILED,
+                        "Error in opening the control semaphore, errno: " << strerror(errno));
+
+        if (sem_wait(controlSemaphore) == -1)
         {
-            std::ifstream csv{};
-            csv.open(m_controlFilename.c_str(), std::ifstream::in);
-            if (!csv.is_open())
-            {
-                NS_FATAL_ERROR("Can't open file " << m_controlFilename.c_str());
-            }
-            std::string line;
-
-            if (m_controlFilename.find("ts_actions_for_ns3.csv") != std::string::npos)
-            { // TODO adapt to the scheduling of the messages
-
-                long long timestamp{};
-
-                while (std::getline(csv, line))
-                {
-                    if (line == "")
-                    {
-                        // skip empty lines
-                        continue;
-                    }
-                    NS_LOG_INFO("Read handover command");
-                    std::stringstream lineStream(line);
-                    std::string cell;
-
-                    std::getline(lineStream, cell, ',');
-                    timestamp = std::stoll(cell);
-
-                    uint64_t imsi;
-                    std::getline(lineStream, cell, ',');
-                    imsi = std::stoi(cell);
-
-                    uint16_t targetCellId;
-                    std::getline(lineStream, cell, ',');
-                    // uncomment the next line if need to remove PLM ID, first 3 digits always 111
-                    // cell.erase(0, 3);
-                    targetCellId = std::stoi(cell);
-
-                    NS_LOG_INFO("Handover command for timestamp " << timestamp << " imsi " << imsi
-                                                                  << " targetCellId "
-                                                                  << targetCellId);
-
-                    uint16_t rntiUe = m_rrc->GetRntiFromImsi(imsi);
-                    uint16_t sourceCellId = m_rrc->GetUeManager(rntiUe)->GetMmWaveCellId();
-                    if (sourceCellId == targetCellId)
-                    {
-                        NS_LOG_WARN("Source CellId and Target CellId are the same "
-                                    << unsigned(sourceCellId) << ", ignoring HO request");
-                        continue;
-                    }
-
-                    m_rrc->TakeUeHoControl(imsi);
-                    Simulator::ScheduleWithContext(1,
-                                                   Seconds(0),
-                                                   &LteEnbRrc::PerformHandoverToTargetCell,
-                                                   m_rrc,
-                                                   imsi,
-                                                   targetCellId);
-                }
-            }
-            else if (m_controlFilename.find("es_actions_for_ns3.csv") != std::string::npos)
-            {
-                long long timestamp{};
-                uint8_t counter = 0;
-                while (std::getline(csv, line))
-                {
-                    if (line == "")
-                    {
-                        // skip empty lines
-                        continue;
-                    }
-                    NS_LOG_INFO("Read evict users command");
-                    counter++;
-                    std::stringstream lineStream(line);
-                    std::string cell;
-
-                    std::getline(lineStream, cell, ',');
-                    timestamp = std::stoll(cell);
-
-                    uint16_t cellId;
-                    std::getline(lineStream, cell, ',');
-                    // uncomment the next line if need to remove PLM ID, first 3 digits always 111
-                    // cell.erase(0, 3);
-                    cellId = std::stoi(cell);
-
-                    bool hoAllowed; // TODO enforce correctness by checking what value is written in
-                                    // the file (should be 0 for false and 1 for true now)
-                    std::getline(lineStream, cell, ',');
-                    hoAllowed = std::stoi(cell);
-
-                    NS_LOG_INFO("Set allowed command with timestamp "
-                                << timestamp << " cellId " << cellId << " hoAllowed " << hoAllowed);
-
-                    // set the status of the cell (On/Off)
-                    if (!m_scheduleControlMessages)
-                    {
-                        m_rrc->SetSecondaryCellHandoverAllowedStatus(cellId, hoAllowed);
-                    }
-                    else
-                    { // Here we pre-schedule all the functions to be executed during the simulation
-                        Simulator::Schedule(MilliSeconds(timestamp),
-                                            &LteEnbRrc::SetSecondaryCellHandoverAllowedStatus,
-                                            m_rrc,
-                                            cellId,
-                                            hoAllowed);
-                    }
-                }
-
-                if (counter > 0)
-                { // we want this to be triggered only when we have some new data to process
-                    // Triggers (or schedules) the handovers for UEs in the Off cells
-                    if (!m_scheduleControlMessages)
-                    {
-                        m_rrc->EvictUsersFromSecondaryCell();
-                    }
-                    else
-                    {
-                        // we introduce a minimum offset of 0.001 to make sure that this is
-                        // scheduled after. This may be unnecessary according to the internal
-                        // working of ns-3 But ¯\_(ツ)_/¯
-                        Simulator::Schedule(MilliSeconds(timestamp + 0.001),
-                                            &LteEnbRrc::EvictUsersFromSecondaryCell,
-                                            m_rrc);
-                    }
-                }
-            }
-            else if (m_controlFilename.find("qos_actions.csv") != std::string::npos)
-            { // TODO adapt to the scheduling of the messages
-                long long timestamp{};
-                std::unordered_map<uint16_t, double> uePercentages{};
-                NS_LOG_INFO("Read QoS command");
-                while (std::getline(csv, line))
-                {
-                    if (line == "")
-                    {
-                        // skip empty lines
-                        continue;
-                    }
-
-                    std::stringstream lineStream(line);
-                    std::string data;
-
-                    std::getline(lineStream, data, ',');
-                    timestamp = std::stoll(data);
-
-                    uint16_t ueId;
-                    std::getline(lineStream, data, ',');
-                    // uncomment the next line if need to remove PLM ID, first 3 digits always 111
-                    // cell.erase(0, 3);
-                    ueId = std::stoi(data);
-
-                    double uePerc;
-                    std::getline(lineStream, data, ',');
-                    uePerc = std::stof(data);
-                    if (uePerc < 0 || uePerc > 1)
-                    {
-                        NS_LOG_ERROR("Wrong value for ueid " << uePerc << " percentage ");
-                    }
-                    else
-                    {
-                        NS_LOG_INFO("Set ue percentage command with timestamp "
-                                    << timestamp << " ueId " << ueId << "percentage" << uePerc);
-                        uePercentages.insert({ueId, uePerc});
-                    }
-                }
-
-                auto ueMap = m_rrc->GetUeMap();
-                for (std::pair<uint64_t, double> uePercentage : uePercentages)
-                {
-                    uint16_t ueId = m_rrc->GetRntiFromImsi(uePercentage.first);
-                    if (ueMap.find(ueId) == ueMap.end())
-                    {
-                        NS_LOG_ERROR(ueId << " not found in UeMap");
-                        NS_LOG_ERROR("Current map status:");
-                        for (std::pair<uint16_t, ns3::Ptr<ns3::UeManager>> ue : ueMap)
-                        {
-                            NS_LOG_ERROR(ue.first);
-                        }
-                        NS_FATAL_ERROR("Wrong UE RNTI passed by the controller, aborting...");
-                    }
-                    double percentage = uePercentage.second;
-                    this->SetUeQoS(ueId, percentage);
-                }
-            }
-            else
-            {
-                NS_FATAL_ERROR(
-                    "Unknown use case not implemented yet with filename: " << m_controlFilename);
-            }
-
-            csv.close();
-
-            if (!m_scheduleControlMessages)
-            { // no need to delete stuff in this mode
-                // This clears the written file without deleting the OS file reference.
-                std::ofstream csvDelete{};
-                csvDelete.open(m_controlFilename.c_str());
-
-                NS_LOG_INFO("File flushed");
-            }
+            NS_FATAL_ERROR("Error wait control control semaphore: " << strerror(errno));
         }
 
-        // Since the message digestion and the control are mutually exclusive,
-        // there is no need to reschedule this action again in the first case.
+        sem_close(controlSemaphore);
+        controlSemaphore = nullptr;
+        // [nsoran-asm] Unblock mmWave gNBs so they apply asm_actions_for_ns3.csv now.
+        m_gymControlReady();
+    }
+
+    std::string tsPath = TsControlPath();
+    std::string esPath = EsControlPath();
+    std::vector<std::string> flushed;
+
+    // [nsoran-tses] ts: TS CSV only; es: ES CSV only (state + eviction);
+    // tses: ES sets hoAllowed only, then TS places UEs, then leftover eviction.
+    if (mode == "asm")
+    {
+        NS_LOG_INFO("ASM Gym handshake: mmWave applies ControlFileNameAsm");
+        flushed.push_back(m_controlFilename);
+    }
+    else if (mode == "tses")
+    {
+        ApplyEsControlFile(esPath, false);
+        std::set<uint64_t> tsHandedOver = ApplyTsControlFile(tsPath);
+        m_rrc->EvictUsersFromSecondaryCell(tsHandedOver);
+        flushed.push_back(esPath);
+        flushed.push_back(tsPath);
+    }
+    else if (mode == "ts")
+    {
+        ApplyTsControlFile(tsPath);
+        flushed.push_back(tsPath);
+    }
+    else if (mode == "es")
+    {
+        ApplyEsControlFile(esPath, true);
+        flushed.push_back(esPath);
+    }
+    else if (mode == "qos")
+    {
+        ApplyQosControlFile(m_controlFilename);
+        flushed.push_back(m_controlFilename);
+    }
+    else
+    {
+        NS_FATAL_ERROR("Unknown use case not implemented yet with filename: "
+                       << m_controlFilename << " mode: " << m_controlMode);
+    }
+
+    if (!m_scheduleControlMessages)
+    {
+        for (const auto& path : flushed)
+        {
+            FlushControlFile(path);
+        }
+        NS_LOG_INFO("File flushed");
+        Simulator::Schedule(Seconds(m_e2Periodicity), &LteEnbNetDevice::ReadControlFile, this);
+    }
+}
+
+std::string
+LteEnbNetDevice::NormalizeControlMode() const
+{
+    std::string mode = m_controlMode;
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (!mode.empty())
+    {
+        return mode;
+    }
+    if (m_controlFilename.find("ts_actions_for_ns3.csv") != std::string::npos)
+    {
+        return "ts";
+    }
+    if (m_controlFilename.find("es_actions_for_ns3.csv") != std::string::npos)
+    {
+        return "es";
+    }
+    if (m_controlFilename.find("qos_actions.csv") != std::string::npos)
+    {
+        return "qos";
+    }
+    if (m_controlFilename.find("asm_actions_for_ns3.csv") != std::string::npos)
+    {
+        return "asm";
+    }
+    return "";
+}
+
+std::string
+LteEnbNetDevice::TsControlPath() const
+{
+    if (m_controlFilename.find("ts_actions_for_ns3.csv") != std::string::npos)
+    {
+        return m_controlFilename;
+    }
+    return m_controlFilenameTs.empty() ? m_controlFilename : m_controlFilenameTs;
+}
+
+std::string
+LteEnbNetDevice::EsControlPath() const
+{
+    if (m_controlFilename.find("es_actions_for_ns3.csv") != std::string::npos)
+    {
+        return m_controlFilename;
+    }
+    return m_controlFilenameEs.empty() ? m_controlFilename : m_controlFilenameEs;
+}
+
+void
+LteEnbNetDevice::FlushControlFile(const std::string& path)
+{
+    if (path.empty())
+    {
+        return;
+    }
+    std::ofstream csvDelete{};
+    csvDelete.open(path.c_str());
+}
+
+std::set<uint64_t>
+LteEnbNetDevice::ApplyTsControlFile(const std::string& path)
+{
+    std::set<uint64_t> handedOver;
+    if (path.empty())
+    {
+        return handedOver;
+    }
+    std::ifstream csv{};
+    csv.open(path.c_str(), std::ifstream::in);
+    if (!csv.is_open())
+    {
+        NS_FATAL_ERROR("Can't open file " << path);
+    }
+    std::string line;
+    while (std::getline(csv, line))
+    {
+        if (line == "")
+        {
+            continue;
+        }
+        NS_LOG_INFO("Read handover command");
+        std::stringstream lineStream(line);
+        std::string cell;
+
+        std::getline(lineStream, cell, ',');
+        long long timestamp = std::stoll(cell);
+
+        uint64_t imsi;
+        std::getline(lineStream, cell, ',');
+        imsi = std::stoi(cell);
+
+        uint16_t targetCellId;
+        std::getline(lineStream, cell, ',');
+        targetCellId = std::stoi(cell);
+
+        NS_LOG_INFO("Handover command for timestamp " << timestamp << " imsi " << imsi
+                                                      << " targetCellId " << targetCellId);
+
+        uint16_t rntiUe = m_rrc->GetRntiFromImsi(imsi);
+        if (rntiUe == 0 || !m_rrc->HasUeManager(rntiUe))
+        {
+            NS_LOG_WARN("UE IMSI " << imsi << " has no RNTI/manager, ignoring TS HO");
+            continue;
+        }
+        uint16_t sourceCellId = m_rrc->GetLastMmWaveCell(imsi);
+        if (sourceCellId == 0)
+        {
+            sourceCellId = m_rrc->GetUeManager(rntiUe)->GetMmWaveCellId();
+        }
+
+        uint16_t resolved = m_rrc->ResolveTsHandoverTarget(imsi, targetCellId);
+        if (resolved == 0)
+        {
+            NS_LOG_WARN("No allowed TS target for IMSI " << imsi << " requested " << targetCellId);
+            continue;
+        }
+        if (sourceCellId == resolved)
+        {
+            NS_LOG_WARN("Source CellId and Target CellId are the same "
+                        << unsigned(sourceCellId) << ", ignoring HO request");
+            continue;
+        }
+
+        m_rrc->TakeUeHoControl(imsi);
+        handedOver.insert(imsi);
+        Simulator::ScheduleWithContext(1,
+                                       Seconds(0),
+                                       &LteEnbRrc::PerformHandoverToTargetCell,
+                                       m_rrc,
+                                       imsi,
+                                       resolved);
+    }
+    csv.close();
+    return handedOver;
+}
+
+void
+LteEnbNetDevice::ApplyEsControlFile(const std::string& path, bool evictUsers)
+{
+    if (path.empty())
+    {
+        return;
+    }
+    std::ifstream csv{};
+    csv.open(path.c_str(), std::ifstream::in);
+    if (!csv.is_open())
+    {
+        NS_FATAL_ERROR("Can't open file " << path);
+    }
+    std::string line;
+    long long timestamp{};
+    uint8_t counter = 0;
+    while (std::getline(csv, line))
+    {
+        if (line == "")
+        {
+            continue;
+        }
+        NS_LOG_INFO("Read evict users command");
+        counter++;
+        std::stringstream lineStream(line);
+        std::string cell;
+
+        std::getline(lineStream, cell, ',');
+        timestamp = std::stoll(cell);
+
+        uint16_t cellId;
+        std::getline(lineStream, cell, ',');
+        cellId = std::stoi(cell);
+
+        bool hoAllowed;
+        std::getline(lineStream, cell, ',');
+        hoAllowed = std::stoi(cell);
+
+        NS_LOG_INFO("Set allowed command with timestamp " << timestamp << " cellId " << cellId
+                                                          << " hoAllowed " << hoAllowed);
+
         if (!m_scheduleControlMessages)
         {
-            // Now that we have a semaphore control, the code will stop, thus avoiding endless
-            // function calls This means that we can safely fix the check at each m_e2Periodicity
-            // (which will be always delayed by 5ms due to the settomgs in the constructor)
-            Simulator::Schedule(Seconds(m_e2Periodicity), &LteEnbNetDevice::ReadControlFile, this);
+            m_rrc->SetSecondaryCellHandoverAllowedStatus(cellId, hoAllowed);
         }
+        else
+        {
+            Simulator::Schedule(MilliSeconds(timestamp),
+                                &LteEnbRrc::SetSecondaryCellHandoverAllowedStatus,
+                                m_rrc,
+                                cellId,
+                                hoAllowed);
+        }
+    }
+    csv.close();
+
+    if (evictUsers && counter > 0)
+    {
+        if (!m_scheduleControlMessages)
+        {
+            m_rrc->EvictUsersFromSecondaryCell();
+        }
+        else
+        {
+            Simulator::Schedule(MilliSeconds(timestamp + 0.001),
+                                &LteEnbRrc::EvictUsersFromSecondaryCell,
+                                m_rrc,
+                                std::set<uint64_t>{});
+        }
+    }
+}
+
+void
+LteEnbNetDevice::ApplyQosControlFile(const std::string& path)
+{
+    if (path.empty())
+    {
+        return;
+    }
+    std::ifstream csv{};
+    csv.open(path.c_str(), std::ifstream::in);
+    if (!csv.is_open())
+    {
+        NS_FATAL_ERROR("Can't open file " << path);
+    }
+    std::string line;
+    std::unordered_map<uint16_t, double> uePercentages{};
+    NS_LOG_INFO("Read QoS command");
+    while (std::getline(csv, line))
+    {
+        if (line == "")
+        {
+            continue;
+        }
+
+        std::stringstream lineStream(line);
+        std::string data;
+
+        std::getline(lineStream, data, ',');
+        long long timestamp = std::stoll(data);
+
+        uint16_t ueId;
+        std::getline(lineStream, data, ',');
+        ueId = std::stoi(data);
+
+        double uePerc;
+        std::getline(lineStream, data, ',');
+        uePerc = std::stof(data);
+        if (uePerc < 0 || uePerc > 1)
+        {
+            NS_LOG_ERROR("Wrong value for ueid " << uePerc << " percentage ");
+        }
+        else
+        {
+            NS_LOG_INFO("Set ue percentage command with timestamp " << timestamp << " ueId "
+                                                                    << ueId << "percentage"
+                                                                    << uePerc);
+            uePercentages.insert({ueId, uePerc});
+        }
+    }
+    csv.close();
+
+    auto ueMap = m_rrc->GetUeMap();
+    for (std::pair<uint64_t, double> uePercentage : uePercentages)
+    {
+        uint16_t ueId = m_rrc->GetRntiFromImsi(uePercentage.first);
+        if (ueMap.find(ueId) == ueMap.end())
+        {
+            NS_LOG_ERROR(ueId << " not found in UeMap");
+            NS_FATAL_ERROR("Wrong UE RNTI passed by the controller, aborting...");
+        }
+        this->SetUeQoS(ueId, uePercentage.second);
     }
 }
 
@@ -599,6 +721,12 @@ LteEnbNetDevice::GetTypeId(void)
                           BooleanValue(true),
                           MakeBooleanAccessor(&LteEnbNetDevice::m_sendCuCp),
                           MakeBooleanChecker())
+            // [nsoran-qos] LTE DU file logging (mmWave already had EnableDuReport). Writes du-cell-<id>.txt.
+            .AddAttribute("EnableDuReport",
+                          "If true, write LTE DU KPMs (including PRB) to du-cell-<id>.txt",
+                          BooleanValue(true),
+                          MakeBooleanAccessor(&LteEnbNetDevice::m_sendDu),
+                          MakeBooleanChecker())
             .AddAttribute("ReducedPmValues",
                           "If true, send only a subset of pmValues",
                           BooleanValue(false),
@@ -619,6 +747,21 @@ LteEnbNetDevice::GetTypeId(void)
                 StringValue(""),
                 MakeStringAccessor(&LteEnbNetDevice::m_controlFilename),
                 MakeStringChecker())
+            .AddAttribute("ControlMode",
+                          "Control use case: ts, es, tses, qos, asm. Empty infers from ControlFileName.",
+                          StringValue(""),
+                          MakeStringAccessor(&LteEnbNetDevice::m_controlMode),
+                          MakeStringChecker())
+            .AddAttribute("ControlFileNameTs",
+                          "TS handover CSV (timestamp,imsi,targetCellId). Used for ts and tses.",
+                          StringValue("ts_actions_for_ns3.csv"),
+                          MakeStringAccessor(&LteEnbNetDevice::m_controlFilenameTs),
+                          MakeStringChecker())
+            .AddAttribute("ControlFileNameEs",
+                          "ES cell on/off CSV (timestamp,cellId,hoAllowed). Used for es and tses.",
+                          StringValue("es_actions_for_ns3.csv"),
+                          MakeStringAccessor(&LteEnbNetDevice::m_controlFilenameEs),
+                          MakeStringChecker())
             .AddAttribute("ScheduleControlMessages",
                           "If true, the control action will be scheduled at the given timestamp in "
                           "milliseconds.\n"
@@ -631,7 +774,11 @@ LteEnbNetDevice::GetTypeId(void)
                           "environment",
                           BooleanValue(false),
                           MakeBooleanAccessor(&LteEnbNetDevice::m_useSemaphores),
-                          MakeBooleanChecker());
+                          MakeBooleanChecker())
+            .AddTraceSource("GymControlReady",
+                            "[nsoran-asm] Fired after the Gym control semaphore wait.",
+                            MakeTraceSourceAccessor(&LteEnbNetDevice::m_gymControlReady),
+                            "ns3::EmptyCallback");
     return tid;
 }
 
@@ -645,7 +792,9 @@ LteEnbNetDevice::LteEnbNetDevice()
       m_forceE2FileLogging(false),
       m_useSemaphores(false),
       m_cuUpFileName(),
-      m_cuCpFileName()
+      m_cuCpFileName(),
+      m_duFileName(),      // [nsoran-qos]
+      m_duTraceConnected(false)
 {
     NS_LOG_FUNCTION(this);
 }
@@ -981,6 +1130,36 @@ LteEnbNetDevice::UpdateConfig(void)
                        "DRB.RelActNbr.5QI.UEID (0),eNB id,sameCellSinr,"
                        "sameCellSinr 3gpp encoded\n";
                 csv.close();
+
+                // [nsoran-qos] LTE had CU-UP/CU-CP files only. Mirror mmWave du-cell-*.txt for PRB KPMs.
+                if (m_sendDu)
+                {
+                    m_duFileName = "du-cell-" + std::to_string(m_cellId) + ".txt";
+                    csv.open(m_duFileName.c_str());
+                    csv << "timestamp,ueImsiComplete,plmId,nrCellId,dlAvailablePrbs,"
+                           "ulAvailablePrbs,qci,dlPrbUsage,ulPrbUsage,"
+                           "TB.TotNbrDl.1,TB.TotNbrDlInitial,TB.TotNbrDlInitial.Qpsk,"
+                           "TB.TotNbrDlInitial.16Qam,TB.TotNbrDlInitial.64Qam,RRU.PrbUsedDl,"
+                           "TB.ErrTotalNbrDl.1,QosFlow.PdcpPduVolumeDL_Filter,"
+                           "CARR.PDSCHMCSDist.Bin1,CARR.PDSCHMCSDist.Bin2,CARR.PDSCHMCSDist.Bin3,"
+                           "CARR.PDSCHMCSDist.Bin4,CARR.PDSCHMCSDist.Bin5,CARR.PDSCHMCSDist.Bin6,"
+                           "L1M.RS-SINR.Bin34,L1M.RS-SINR.Bin46,L1M.RS-SINR.Bin58,"
+                           "L1M.RS-SINR.Bin70,L1M.RS-SINR.Bin82,L1M.RS-SINR.Bin94,L1M.RS-SINR.Bin127,"
+                           "DRB.BufferSize.Qos,DRB.MeanActiveUeDl,"
+                           "TB.TotNbrDl.1.UEID,TB.TotNbrDlInitial.UEID,TB.TotNbrDlInitial.Qpsk.UEID,"
+                           "TB.TotNbrDlInitial.16Qam.UEID,TB.TotNbrDlInitial.64Qam.UEID,"
+                           "TB.ErrTotalNbrDl.1.UEID,QosFlow.PdcpPduVolumeDL_Filter.UEID,"
+                           "RRU.PrbUsedDl.UEID,CARR.PDSCHMCSDist.Bin1.UEID,"
+                           "CARR.PDSCHMCSDist.Bin2.UEID,CARR.PDSCHMCSDist.Bin3.UEID,"
+                           "CARR.PDSCHMCSDist.Bin4.UEID,CARR.PDSCHMCSDist.Bin5.UEID,"
+                           "CARR.PDSCHMCSDist.Bin6.UEID,L1M.RS-SINR.Bin34.UEID,"
+                           "L1M.RS-SINR.Bin46.UEID,L1M.RS-SINR.Bin58.UEID,L1M.RS-SINR.Bin70.UEID,"
+                           "L1M.RS-SINR.Bin82.UEID,L1M.RS-SINR.Bin94.UEID,L1M.RS-SINR.Bin127.UEID,"
+                           "DRB.BufferSize.Qos.UEID,DRB.UEThpDl.UEID,DRB.UEThpDlPdcpBased.UEID\n";
+                    csv.close();
+                    ConnectDuMacTrace();
+                }
+
                 Simulator::Schedule(MicroSeconds(500),
                                     &LteEnbNetDevice::BuildAndSendReportMessage,
                                     this,
@@ -1034,8 +1213,22 @@ LteEnbNetDevice::UpdateConfig(void)
 
                     // This is needed when the output of the simulation and the control file are
                     // saved in a different folder from the ns-3 one
-                    m_controlFilename = currentDirectory + '/' + m_controlFilename;
-                    NS_LOG_INFO("The filename of the control file is " << m_controlFilename);
+                    if (!m_controlFilename.empty() && m_controlFilename[0] != '/')
+                    {
+                        m_controlFilename = currentDirectory + '/' + m_controlFilename;
+                    }
+                    if (!m_controlFilenameTs.empty() && m_controlFilenameTs[0] != '/')
+                    {
+                        m_controlFilenameTs = currentDirectory + '/' + m_controlFilenameTs;
+                    }
+                    if (!m_controlFilenameEs.empty() && m_controlFilenameEs[0] != '/')
+                    {
+                        m_controlFilenameEs = currentDirectory + '/' + m_controlFilenameEs;
+                    }
+                    NS_LOG_INFO("The filename of the control file is " << m_controlFilename
+                                                                       << " mode " << m_controlMode
+                                                                       << " ts " << m_controlFilenameTs
+                                                                       << " es " << m_controlFilenameEs);
                 }
 
                 // Set the first Control Action to happen after 5 ms to the first m_e2Periodicity
@@ -1433,6 +1626,12 @@ LteEnbNetDevice::BuildAndSendReportMessage(E2Termination::RicSubscriptionRequest
     NS_LOG_DEBUG("LteEnbNetDevice " << std::to_string(m_cellId) << " BuildAndSendMessage at time "
                                     << Simulator::Now().GetSeconds());
 
+    // [nsoran-qos] DU before CU-UP: CU-UP ResetResultsForImsiLcid would zero PDCP GetDlTxData.
+    if (m_sendDu && m_forceE2FileLogging)
+    {
+        WriteDuReport();
+    }
+
     if (m_sendCuUp)
     {
         // Create CU-UP
@@ -1498,6 +1697,380 @@ LteEnbNetDevice::BuildAndSendReportMessage(E2Termination::RicSubscriptionRequest
                             &LteEnbNetDevice::BuildAndSendReportMessage,
                             this,
                             params);
+}
+
+void
+LteEnbNetDevice::ConnectDuMacTrace()
+{
+    // [nsoran-qos] MAC grants (PRB/MCS) + PHY ndi (initial vs HARQ retx)
+    if (m_duTraceConnected)
+    {
+        return;
+    }
+    Ptr<LteEnbMac> mac = GetMac();
+    if (!mac)
+    {
+        NS_LOG_WARN("LTE DU: MAC not ready, cannot connect DlScheduling");
+        return;
+    }
+    bool ok = mac->TraceConnectWithoutContext(
+        "DlScheduling",
+        MakeCallback(&LteEnbNetDevice::DlSchedulingForDu, this));
+    NS_ABORT_MSG_IF(!ok, "Failed to connect LTE DlScheduling for DU PRB logging");
+    Ptr<LteEnbPhy> phy = GetPhy();
+    if (phy)
+    {
+        ok = phy->TraceConnectWithoutContext(
+            "DlPhyTransmission",
+            MakeCallback(&LteEnbNetDevice::DlPhyTransmissionForDu, this));
+        NS_ABORT_MSG_IF(!ok, "Failed to connect LTE DlPhyTransmission for DU HARQ/SINR");
+    }
+    else
+    {
+        NS_LOG_WARN("LTE DU: PHY not ready, HARQ/SINR bins stay empty");
+    }
+    m_duTraceConnected = true;
+}
+
+void
+LteEnbNetDevice::DlSchedulingForDu(DlSchedulingCallbackInfo info)
+{
+    LteDuUeStats& stats = m_duUeStats[info.rnti];
+    stats.nTb++;
+    stats.nPrbSum += info.nPrb;
+    stats.tbBytes += info.sizeTb1 + info.sizeTb2;
+    auto addMcs = [](LteDuUeStats& s, uint8_t mcs) {
+        if (mcs <= 4)
+        {
+            s.mcs04++;
+        }
+        else if (mcs <= 9)
+        {
+            s.mcs59++;
+        }
+        else if (mcs <= 14)
+        {
+            s.mcs1014++;
+        }
+        else if (mcs <= 19)
+        {
+            s.mcs1519++;
+        }
+        else if (mcs <= 24)
+        {
+            s.mcs2024++;
+        }
+        else
+        {
+            s.mcs2529++;
+        }
+        if (mcs <= 9)
+        {
+            s.qpsk++;
+        }
+        else if (mcs <= 16)
+        {
+            s.qam16++;
+        }
+        else
+        {
+            s.qam64++;
+        }
+    };
+    addMcs(stats, info.mcsTb1);
+    if (info.sizeTb2 > 0)
+    {
+        addMcs(stats, info.mcsTb2);
+    }
+}
+
+void
+LteEnbNetDevice::DlPhyTransmissionForDu(PhyTransmissionStatParameters params)
+{
+    // [nsoran-qos] mmWave DU uses PHY rv==0 as initial; LTE uses ndi==1 (new TB).
+    if (params.m_cellId != m_cellId)
+    {
+        return;
+    }
+    LteDuUeStats& stats = m_duUeStats[params.m_rnti];
+    if (params.m_ndi == 1)
+    {
+        stats.nTbInitial++;
+    }
+    else
+    {
+        stats.nRetx++;
+    }
+
+    uint64_t imsi = params.m_imsi;
+    if (imsi == 0 && m_rrc)
+    {
+        imsi = m_rrc->GetImsiFromRnti(params.m_rnti);
+    }
+    if (imsi == 0)
+    {
+        return;
+    }
+    ImsiCellIdPair_t cid{imsi, m_cellId};
+    auto sinrIt = m_l3sinrMap.find(cid);
+    if (sinrIt == m_l3sinrMap.end() || sinrIt->second <= 0)
+    {
+        return;
+    }
+    double sinrDb = 10.0 * std::log10(static_cast<double>(sinrIt->second));
+    int bin = 6;
+    if (sinrDb <= -6)
+    {
+        bin = 0;
+    }
+    else if (sinrDb <= 0)
+    {
+        bin = 1;
+    }
+    else if (sinrDb <= 6)
+    {
+        bin = 2;
+    }
+    else if (sinrDb <= 12)
+    {
+        bin = 3;
+    }
+    else if (sinrDb <= 18)
+    {
+        bin = 4;
+    }
+    else if (sinrDb <= 24)
+    {
+        bin = 5;
+    }
+    stats.sinrBin[bin]++;
+}
+
+uint32_t
+LteEnbNetDevice::GetRlcBufferOccupancy(Ptr<LteRlc> rlc) const
+{
+    // [nsoran-qos] Same RLC peek as MmWaveEnbNetDevice::GetRlcBufferOccupancy
+    if (DynamicCast<LteRlcAm>(rlc))
+    {
+        return DynamicCast<LteRlcAm>(rlc)->GetTxBufferSize();
+    }
+    else if (DynamicCast<LteRlcUm>(rlc))
+    {
+        return DynamicCast<LteRlcUm>(rlc)->GetTxBufferSize();
+    }
+    else if (DynamicCast<LteRlcUmLowLat>(rlc))
+    {
+        return DynamicCast<LteRlcUmLowLat>(rlc)->GetTxBufferSize();
+    }
+    return 0;
+}
+
+void
+LteEnbNetDevice::WriteDuReport()
+{
+    // [nsoran-qos] Same CSV schema as mmWave du-cell-*.txt.
+    // RRU.PrbUsedDl.UEID = sum(nPrb) / nTtis (average PRBs per LTE TTI).
+    // Gym EE later: occupancy = LTE_value/dlAvailablePrbs + NR_value/139 (do not add raw).
+    if (m_duFileName.empty())
+    {
+        return;
+    }
+
+    std::ofstream csv;
+    csv.open(m_duFileName.c_str(), std::ios_base::app);
+    if (!csv.is_open())
+    {
+        NS_LOG_ERROR("Can't open LTE DU file " << m_duFileName);
+        return;
+    }
+
+    auto ueMap = m_rrc->GetUeMap();
+    uint32_t nTtis = static_cast<uint32_t>(std::round(m_e2Periodicity * 1000.0));
+    if (nTtis == 0)
+    {
+        nTtis = 1;
+    }
+    long dlAvailablePrbs = GetDlBandwidth();
+    if (dlAvailablePrbs <= 0)
+    {
+        dlAvailablePrbs = 100;
+    }
+
+    uint32_t macPduCell = 0;
+    uint32_t macPduInitialCell = 0;
+    uint32_t macRetxCell = 0;
+    uint32_t qpskCell = 0;
+    uint32_t qam16Cell = 0;
+    uint32_t qam64Cell = 0;
+    uint32_t mcs04Cell = 0;
+    uint32_t mcs59Cell = 0;
+    uint32_t mcs1014Cell = 0;
+    uint32_t mcs1519Cell = 0;
+    uint32_t mcs2024Cell = 0;
+    uint32_t mcs2529Cell = 0;
+    uint32_t sinrBinCell[7]{};
+    uint32_t rlcBufferCell = 0;
+    uint64_t volumeCell = 0;
+    double prbCell = 0.0;
+
+    std::unordered_map<uint64_t, std::string> uePmStringDu;
+    for (auto ue : ueMap)
+    {
+        uint16_t rnti = ue.first;
+        uint64_t imsi = ue.second->GetImsi();
+        LteDuUeStats stats{};
+        auto it = m_duUeStats.find(rnti);
+        if (it != m_duUeStats.end())
+        {
+            stats = it->second;
+        }
+        if (stats.nTbInitial == 0 && stats.nRetx == 0)
+        {
+            stats.nTbInitial = stats.nTb;
+        }
+
+        double macPrb = static_cast<double>(stats.nPrbSum) / static_cast<double>(nTtis);
+        uint64_t volumeKbit = static_cast<uint64_t>(std::round(stats.tbBytes * 8.0 / 1e3));
+        double thrKbps = 0.0;
+        double thrPdcpKbps = 0.0;
+        if (m_e2Periodicity > 0)
+        {
+            // LTE air bits this period (MAC TB), not the combined EN-DC PDCP offered load.
+            thrKbps = stats.tbBytes * 8.0 / 1e3 / m_e2Periodicity;
+        }
+        if (m_e2PdcpStatsCalculator && m_e2Periodicity > 0)
+        {
+            double txBytes = m_e2PdcpStatsCalculator->GetDlTxData(imsi, 3);
+            thrPdcpKbps = txBytes * 8.0 / 1e3 / m_e2Periodicity;
+        }
+
+        uint32_t rlcBufferOccup = 0;
+        auto drbMap = ue.second->GetDrbMap();
+        for (auto drb : drbMap)
+        {
+            rlcBufferOccup += GetRlcBufferOccupancy(drb.second->m_rlc);
+        }
+        auto rlcMap = ue.second->GetRlcMap();
+        for (auto drb : rlcMap)
+        {
+            rlcBufferOccup += GetRlcBufferOccupancy(drb.second->m_rlc);
+        }
+
+        bool anySinr = false;
+        for (int b = 0; b < 7; ++b)
+        {
+            if (stats.sinrBin[b] > 0)
+            {
+                anySinr = true;
+                break;
+            }
+        }
+        if (!anySinr)
+        {
+            ImsiCellIdPair_t cid{imsi, m_cellId};
+            auto sinrIt = m_l3sinrMap.find(cid);
+            if (sinrIt != m_l3sinrMap.end() && sinrIt->second > 0)
+            {
+                double sinrDb = 10.0 * std::log10(static_cast<double>(sinrIt->second));
+                int bin = 6;
+                if (sinrDb <= -6)
+                {
+                    bin = 0;
+                }
+                else if (sinrDb <= 0)
+                {
+                    bin = 1;
+                }
+                else if (sinrDb <= 6)
+                {
+                    bin = 2;
+                }
+                else if (sinrDb <= 12)
+                {
+                    bin = 3;
+                }
+                else if (sinrDb <= 18)
+                {
+                    bin = 4;
+                }
+                else if (sinrDb <= 24)
+                {
+                    bin = 5;
+                }
+                uint32_t n = stats.nTb > 0 ? stats.nTb : 1;
+                stats.sinrBin[bin] += n;
+            }
+        }
+
+        macPduCell += stats.nTb;
+        macPduInitialCell += stats.nTbInitial;
+        macRetxCell += stats.nRetx;
+        qpskCell += stats.qpsk;
+        qam16Cell += stats.qam16;
+        qam64Cell += stats.qam64;
+        mcs04Cell += stats.mcs04;
+        mcs59Cell += stats.mcs59;
+        mcs1014Cell += stats.mcs1014;
+        mcs1519Cell += stats.mcs1519;
+        mcs2024Cell += stats.mcs2024;
+        mcs2529Cell += stats.mcs2529;
+        volumeCell += volumeKbit;
+        prbCell += macPrb;
+        rlcBufferCell += rlcBufferOccup;
+        for (int b = 0; b < 7; ++b)
+        {
+            sinrBinCell[b] += stats.sinrBin[b];
+        }
+
+        uePmStringDu[imsi] =
+            std::to_string(stats.nTb) + "," + std::to_string(stats.nTbInitial) + "," +
+            std::to_string(stats.qpsk) + "," + std::to_string(stats.qam16) + "," +
+            std::to_string(stats.qam64) + "," + std::to_string(stats.nRetx) + "," +
+            std::to_string(volumeKbit) + "," + std::to_string(macPrb) + "," +
+            std::to_string(stats.mcs04) + "," + std::to_string(stats.mcs59) + "," +
+            std::to_string(stats.mcs1014) + "," + std::to_string(stats.mcs1519) + "," +
+            std::to_string(stats.mcs2024) + "," + std::to_string(stats.mcs2529) + "," +
+            std::to_string(stats.sinrBin[0]) + "," + std::to_string(stats.sinrBin[1]) + "," +
+            std::to_string(stats.sinrBin[2]) + "," + std::to_string(stats.sinrBin[3]) + "," +
+            std::to_string(stats.sinrBin[4]) + "," + std::to_string(stats.sinrBin[5]) + "," +
+            std::to_string(stats.sinrBin[6]) + "," + std::to_string(rlcBufferOccup) + "," +
+            std::to_string(thrKbps) + "," + std::to_string(thrPdcpKbps);
+    }
+
+    long dlPrbUsage =
+        std::min(static_cast<long>(prbCell / dlAvailablePrbs * 100.0), static_cast<long>(100));
+    std::string plmId = "111";
+    uint64_t timestamp = m_startTime + Simulator::Now().GetMilliSeconds();
+
+    std::string to_print_cell =
+        plmId + "," + std::to_string(m_cellId) + "," + std::to_string(dlAvailablePrbs) + "," +
+        std::to_string(dlAvailablePrbs) + ",1," + std::to_string(dlPrbUsage) + ",0," +
+        std::to_string(macPduCell) + "," + std::to_string(macPduInitialCell) + "," +
+        std::to_string(qpskCell) + "," + std::to_string(qam16Cell) + "," +
+        std::to_string(qam64Cell) + "," + std::to_string(static_cast<long>(std::ceil(prbCell))) +
+        "," + std::to_string(macRetxCell) + "," + std::to_string(volumeCell) + "," +
+        std::to_string(mcs04Cell) + "," + std::to_string(mcs59Cell) + "," +
+        std::to_string(mcs1014Cell) + "," + std::to_string(mcs1519Cell) + "," +
+        std::to_string(mcs2024Cell) + "," + std::to_string(mcs2529Cell) + "," +
+        std::to_string(sinrBinCell[0]) + "," + std::to_string(sinrBinCell[1]) + "," +
+        std::to_string(sinrBinCell[2]) + "," + std::to_string(sinrBinCell[3]) + "," +
+        std::to_string(sinrBinCell[4]) + "," + std::to_string(sinrBinCell[5]) + "," +
+        std::to_string(sinrBinCell[6]) + "," + std::to_string(rlcBufferCell) + "," +
+        std::to_string(ueMap.size());
+
+    for (auto ue : ueMap)
+    {
+        uint64_t imsi = ue.second->GetImsi();
+        auto pmIt = uePmStringDu.find(imsi);
+        if (pmIt == uePmStringDu.end())
+        {
+            continue;
+        }
+        csv << timestamp << "," << GetImsiString(imsi) << "," << to_print_cell << "," << pmIt->second
+            << "\n";
+    }
+    csv.close();
+    m_duUeStats.clear();
 }
 
 void

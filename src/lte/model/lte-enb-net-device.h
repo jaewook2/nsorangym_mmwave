@@ -29,6 +29,7 @@
 #include "ns3/event-id.h"
 #include "ns3/lte-net-device.h"
 #include "ns3/lte-phy.h"
+#include "ns3/lte-common.h"
 #include "ns3/mac48-address.h"
 #include "ns3/mmwave-bearer-stats-calculator.h"
 #include "ns3/nstime.h"
@@ -36,6 +37,7 @@
 #include <ns3/oran-interface.h>
 
 #include <map>
+#include <set>
 #include <vector>
 
 namespace ns3
@@ -48,6 +50,7 @@ class LtePhy;
 class LteEnbPhy;
 class LteEnbMac;
 class LteEnbRrc;
+class LteRlc;
 class FfMacScheduler;
 class LteHandoverAlgorithm;
 class LteAnr;
@@ -288,8 +291,21 @@ class LteEnbNetDevice : public LteNetDevice
                                                       uint16_t nrCellId);
     Ptr<KpmIndicationMessage> BuildRicIndicationMessageCuUp(std::string plmId);
     Ptr<KpmIndicationMessage> BuildRicIndicationMessageCuCp(std::string plmId);
+    // [nsoran-qos] LTE DU txt (du-cell-<id>.txt). Upstream LTE eNB has CU-UP/CU-CP only.
+    void ConnectDuMacTrace();
+    void DlSchedulingForDu(DlSchedulingCallbackInfo info);
+    void DlPhyTransmissionForDu(PhyTransmissionStatParameters params);
+    uint32_t GetRlcBufferOccupancy(Ptr<LteRlc> rlc) const;
+    void WriteDuReport();
     std::string GetImsiString(uint64_t imsi);
     void ReadControlFile();
+    std::string NormalizeControlMode() const;
+    std::string TsControlPath() const;
+    std::string EsControlPath() const;
+    std::set<uint64_t> ApplyTsControlFile(const std::string& path);
+    void ApplyEsControlFile(const std::string& path, bool evictUsers = true);
+    void ApplyQosControlFile(const std::string& path);
+    void FlushControlFile(const std::string& path);
     std::string GetCurrentDirectory ();
 
     void RegisterNewSinrReading(uint64_t imsi, uint16_t cellId, long double sinr);
@@ -344,6 +360,7 @@ class LteEnbNetDevice : public LteNetDevice
 
     bool m_sendCuUp;
     bool m_sendCuCp;
+    bool m_sendDu; // [nsoran-qos] LTE EnableDuReport
     uint64_t m_startTime;
     bool m_isReportingEnabled; //! true is KPM reporting cycle is active, false otherwise
 
@@ -353,13 +370,40 @@ class LteEnbNetDevice : public LteNetDevice
     bool m_useSemaphores; //< if true set up the semaphores for the external control
     std::string m_metricsReadySemaphoreName; //< name of the semaphore ensuring the consumption of the metrics when they are ready
     std::string m_controlSemaphoreName; //< name of the semaphore ensuring the the consumption of the control file when is ready
+    TracedCallback<> m_gymControlReady; // [nsoran-asm] after Gym control wait, mmWave applies ASM CSV
 
     std::vector<size_t> m_ueRrcMean;
 
     std::string m_cuUpFileName;
     std::string m_cuCpFileName;
+    // [nsoran-qos] LTE DU file + per-RNTI PRB accumulators (reset each E2 period)
+    std::string m_duFileName;
+
+    struct LteDuUeStats
+    {
+        uint32_t nTb{0};
+        uint32_t nTbInitial{0};
+        uint32_t nRetx{0};
+        uint32_t nPrbSum{0};
+        uint64_t tbBytes{0};
+        uint32_t qpsk{0};
+        uint32_t qam16{0};
+        uint32_t qam64{0};
+        uint32_t mcs04{0};
+        uint32_t mcs59{0};
+        uint32_t mcs1014{0};
+        uint32_t mcs1519{0};
+        uint32_t mcs2024{0};
+        uint32_t mcs2529{0};
+        uint32_t sinrBin[7]{};
+    };
+    std::map<uint16_t, LteDuUeStats> m_duUeStats;
+    bool m_duTraceConnected;
 
     std::string m_controlFilename;
+    std::string m_controlMode; // [nsoran-tses] ts | es | tses | qos | asm; empty infers from filename
+    std::string m_controlFilenameTs;
+    std::string m_controlFilenameEs;
     bool m_scheduleControlMessages;
     int m_lastValidTimestamp{0};
 

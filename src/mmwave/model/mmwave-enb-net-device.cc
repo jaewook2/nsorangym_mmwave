@@ -33,6 +33,7 @@
 
 #include "encode_e2apv1.hpp"
 #include "mmwave-net-device.h"
+#include "mmwave-phy-mac-common.h"
 #include "mmwave-ue-net-device.h"
 
 #include <ns3/abort.h>
@@ -45,21 +46,27 @@
 #include <ns3/llc-snap-header.h>
 #include <ns3/log.h>
 #include <ns3/lte-enb-component-carrier-manager.h>
+#include <ns3/lte-enb-net-device.h>
 #include <ns3/lte-enb-rrc.h>
 #include <ns3/lte-rlc-am.h>
 #include <ns3/lte-rlc-um-lowlat.h>
 #include <ns3/lte-rlc-um.h>
 #include <ns3/mmwave-component-carrier-enb.h>
 #include <ns3/mmwave-indication-message-helper.h>
+#include <ns3/node-list.h>
 #include <ns3/node.h>
 #include <ns3/packet-burst.h>
 #include <ns3/packet.h>
 #include <ns3/pointer.h>
 #include <ns3/simulator.h>
+#include <ns3/string.h>
 #include <ns3/trace-source-accessor.h>
 #include <ns3/uinteger.h>
 
+#include <cctype>
+#include <fstream>
 #include <numeric>
+#include <sstream>
 
 namespace ns3
 {
@@ -231,6 +238,13 @@ TypeId MmWaveEnbNetDevice::GetTypeId ()
                           UintegerValue(0),
                           MakeUintegerAccessor(&MmWaveEnbNetDevice::m_cellId),
                           MakeUintegerChecker<uint16_t>())
+            .AddAttribute("AsmMode",
+                          "ASM data duty: 1=100%, 2=75%, 3=50%, 4=25%, 5=0% of data "
+                          "symbols. 6=TurnOff (HO barred, evict to other mmWave or LTE).",
+                          UintegerValue(1),
+                          MakeUintegerAccessor(&MmWaveEnbNetDevice::SetAsmMode,
+                                               &MmWaveEnbNetDevice::GetAsmMode),
+                          MakeUintegerChecker<uint8_t>(1, 6))
             .AddAttribute("BasicCellId",
                           "Basic cell ID. This is needed to properly loop over neighbors.",
                           UintegerValue(1),
@@ -280,7 +294,33 @@ TypeId MmWaveEnbNetDevice::GetTypeId ()
                           "If true, force E2 indication generation and write E2 fields in csv file",
                           BooleanValue(false),
                           MakeBooleanAccessor(&MmWaveEnbNetDevice::m_forceE2FileLogging),
-                          MakeBooleanChecker());
+                          MakeBooleanChecker())
+            .AddAttribute(
+                "ControlFileNameAsm",
+                "[nsoran-asm] CSV of runtime ASM updates. "
+                "timestampMs,cellId,asmMode (cellId 0 = this cell) or timestampMs,asmMode. "
+                "Empty disables runtime ASM control.",
+                StringValue(""),
+                MakeStringAccessor(&MmWaveEnbNetDevice::m_asmControlFilename),
+                MakeStringChecker())
+            .AddAttribute("ScheduleAsmControl",
+                          "[nsoran-asm] If true, timestamps are absolute sim time in ms and the "
+                          "file is read once. If false, apply immediately and poll every "
+                          "AsmControlPeriodicity seconds.",
+                          BooleanValue(true),
+                          MakeBooleanAccessor(&MmWaveEnbNetDevice::m_scheduleAsmControl),
+                          MakeBooleanChecker())
+            .AddAttribute("FlushAsmControlFile",
+                          "[nsoran-asm] If true and ScheduleAsmControl is false, truncate the CSV "
+                          "after each read (Gym-style). Keep false when several gNBs share one file.",
+                          BooleanValue(false),
+                          MakeBooleanAccessor(&MmWaveEnbNetDevice::m_flushAsmControlFile),
+                          MakeBooleanChecker())
+            .AddAttribute("AsmControlPeriodicity",
+                          "[nsoran-asm] Poll period (s) when ScheduleAsmControl is false.",
+                          DoubleValue(0.1),
+                          MakeDoubleAccessor(&MmWaveEnbNetDevice::m_asmControlPeriodicity),
+                          MakeDoubleChecker<double>(0.001, 10.0));
     return tid;
 }
 
@@ -317,6 +357,18 @@ MmWaveEnbNetDevice::DoInitialize(void)
     }
     m_rrc->Initialize();
     m_componentCarrierManager->Initialize();
+    ApplyAsmToSchedulers();
+    if (m_asmMode == 6)
+    {
+        ApplyAsmTurnOff();
+    }
+    if (!m_asmControlFilename.empty())
+    {
+        Simulator::Schedule(MilliSeconds(1), &MmWaveEnbNetDevice::ReadAsmControlFile, this);
+        Config::ConnectFailSafe(
+            "/NodeList/*/DeviceList/*/$ns3::LteEnbNetDevice/GymControlReady",
+            MakeBoundCallback(&MmWaveEnbNetDevice::RecvGymControlReady, this));
+    }
 
     if (m_sendCuCp)
     {
@@ -615,6 +667,249 @@ MmWaveEnbNetDevice::SetCcMap(std::map<uint8_t, Ptr<MmWaveComponentCarrier>> ccm)
 {
     NS_ASSERT_MSG(!m_isConfigured, "attempt to set CC map after configuration");
     m_ccMap = ccm;
+    ApplyAsmToSchedulers();
+}
+
+void
+MmWaveEnbNetDevice::SetAsmMode(uint8_t mode)
+{
+    NS_ABORT_MSG_IF(mode < 1 || mode > 6, "ASM mode must be 1..6");
+    uint8_t oldMode = m_asmMode;
+    m_asmMode = mode;
+    ApplyAsmToSchedulers();
+    if (mode == 6 && oldMode != 6)
+    {
+        ApplyAsmTurnOff();
+    }
+    else if (oldMode == 6 && mode != 6)
+    {
+        ApplyAsmTurnOn();
+    }
+    if (oldMode != mode)
+    {
+        LogAsmModeChange(oldMode, mode);
+    }
+}
+
+Ptr<LteEnbRrc>
+MmWaveEnbNetDevice::FindMasterLteRrc() const
+{
+    for (NodeList::Iterator it = NodeList::Begin(); it != NodeList::End(); ++it)
+    {
+        Ptr<Node> node = *it;
+        for (uint32_t i = 0; i < node->GetNDevices(); ++i)
+        {
+            Ptr<LteEnbNetDevice> lte = DynamicCast<LteEnbNetDevice>(node->GetDevice(i));
+            if (lte && lte->GetRrc())
+            {
+                return lte->GetRrc();
+            }
+        }
+    }
+    return nullptr;
+}
+
+void
+MmWaveEnbNetDevice::ApplyAsmTurnOff()
+{
+    if (m_cellId == 0)
+    {
+        return;
+    }
+    Ptr<LteEnbRrc> lteRrc = FindMasterLteRrc();
+    if (!lteRrc)
+    {
+        NS_LOG_WARN("ASM 6: master LTE RRC not found for cell " << m_cellId);
+        return;
+    }
+    NS_LOG_UNCOND(Simulator::Now().GetMilliSeconds()
+                  << " ms mmWave cell " << m_cellId << " ASM 6 TurnOff: bar HO and evict");
+    lteRrc->SetSecondaryCellHandoverAllowedStatus(m_cellId, false);
+    lteRrc->EvictUsersFromSecondaryCell();
+    SetCellState(enumModeEnergyBs::OFF);
+}
+
+void
+MmWaveEnbNetDevice::ApplyAsmTurnOn()
+{
+    if (m_cellId == 0)
+    {
+        return;
+    }
+    Ptr<LteEnbRrc> lteRrc = FindMasterLteRrc();
+    if (!lteRrc)
+    {
+        NS_LOG_WARN("ASM on: master LTE RRC not found for cell " << m_cellId);
+        return;
+    }
+    NS_LOG_UNCOND(Simulator::Now().GetMilliSeconds()
+                  << " ms mmWave cell " << m_cellId << " leave ASM 6: allow HO and resume LTE UEs");
+    lteRrc->SetSecondaryCellHandoverAllowedStatus(m_cellId, true);
+    lteRrc->ResumeUesFromLteToMmWaveCell(m_cellId);
+    SetCellState(enumModeEnergyBs::ON);
+}
+
+void
+MmWaveEnbNetDevice::LogAsmModeChange(uint8_t oldMode, uint8_t newMode)
+{
+    int dataSym = -1;
+    auto ccMap = GetCcMap();
+    if (!ccMap.empty())
+    {
+        Ptr<MmWaveComponentCarrierEnb> cc =
+            DynamicCast<MmWaveComponentCarrierEnb>(ccMap.begin()->second);
+        if (cc && cc->GetMacScheduler())
+        {
+            dataSym = cc->GetMacScheduler()->GetAvailableDataSymbols();
+        }
+    }
+    NS_LOG_UNCOND(Simulator::Now().GetMilliSeconds()
+                  << " ms mmWave cell " << m_cellId << " ASM " << unsigned(oldMode) << " -> "
+                  << unsigned(newMode) << " dataSymbols=" << dataSym);
+    static std::ofstream logFile;
+    if (!logFile.is_open())
+    {
+        logFile.open("asm-mode-changes.txt", std::ios_base::out | std::ios_base::trunc);
+        logFile << "timeMs,cellId,oldMode,newMode,dataSymbols" << std::endl;
+    }
+    logFile << Simulator::Now().GetMilliSeconds() << "," << m_cellId << "," << unsigned(oldMode)
+            << "," << unsigned(newMode) << "," << dataSym << std::endl;
+    logFile.flush();
+}
+
+void
+MmWaveEnbNetDevice::ReadAsmControlFile()
+{
+    if (m_asmControlFilename.empty())
+    {
+        return;
+    }
+    ApplyAsmControlFile();
+    if (!m_scheduleAsmControl)
+    {
+        if (m_flushAsmControlFile)
+        {
+            std::ofstream csvDelete(m_asmControlFilename.c_str(), std::ios_base::trunc);
+        }
+        Simulator::Schedule(Seconds(m_asmControlPeriodicity),
+                            &MmWaveEnbNetDevice::ReadAsmControlFile,
+                            this);
+    }
+}
+
+void
+MmWaveEnbNetDevice::ApplyAsmControlFile()
+{
+    std::ifstream csv(m_asmControlFilename.c_str());
+    if (!csv.is_open())
+    {
+        NS_LOG_WARN("ASM control file not open yet: " << m_asmControlFilename);
+        return;
+    }
+
+    std::string line;
+    while (std::getline(csv, line))
+    {
+        if (line.empty())
+        {
+            continue;
+        }
+        while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back())))
+        {
+            line.pop_back();
+        }
+        if (line.empty() || !std::isdigit(static_cast<unsigned char>(line[0])))
+        {
+            continue;
+        }
+
+        std::stringstream lineStream(line);
+        std::string field;
+        if (!std::getline(lineStream, field, ','))
+        {
+            continue;
+        }
+        long long timestampMs = std::stoll(field);
+
+        if (!std::getline(lineStream, field, ','))
+        {
+            continue;
+        }
+        uint16_t cellId = m_cellId;
+        uint16_t mode = 0;
+        std::string third;
+        if (std::getline(lineStream, third, ',') && !third.empty())
+        {
+            cellId = static_cast<uint16_t>(std::stoi(field));
+            mode = static_cast<uint16_t>(std::stoi(third));
+        }
+        else
+        {
+            mode = static_cast<uint16_t>(std::stoi(field));
+        }
+
+        if (cellId != 0 && cellId != m_cellId)
+        {
+            continue;
+        }
+        if (mode < 1 || mode > 6)
+        {
+            NS_LOG_ERROR("Invalid ASM mode " << mode << " in " << m_asmControlFilename);
+            continue;
+        }
+
+        NS_LOG_INFO("ASM command ts " << timestampMs << " cell " << m_cellId << " mode " << mode);
+        if (m_scheduleAsmControl)
+        {
+            Time target = MilliSeconds(timestampMs);
+            Time now = Simulator::Now();
+            if (target <= now)
+            {
+                SetAsmMode(static_cast<uint8_t>(mode));
+            }
+            else
+            {
+                Simulator::Schedule(target - now,
+                                    &MmWaveEnbNetDevice::SetAsmMode,
+                                    this,
+                                    static_cast<uint8_t>(mode));
+            }
+        }
+        else
+        {
+            SetAsmMode(static_cast<uint8_t>(mode));
+        }
+    }
+}
+
+uint8_t
+MmWaveEnbNetDevice::GetAsmMode() const
+{
+    return m_asmMode;
+}
+
+void
+MmWaveEnbNetDevice::RecvGymControlReady(Ptr<MmWaveEnbNetDevice> netDev, std::string /*context*/)
+{
+    if (!netDev)
+    {
+        return;
+    }
+    netDev->ApplyAsmControlFile();
+}
+
+void
+MmWaveEnbNetDevice::ApplyAsmToSchedulers()
+{
+    NS_LOG_FUNCTION(this << +m_asmMode);
+    for (auto& it : m_ccMap)
+    {
+        Ptr<MmWaveComponentCarrierEnb> cc = DynamicCast<MmWaveComponentCarrierEnb>(it.second);
+        if (cc && cc->GetMacScheduler())
+        {
+            cc->GetMacScheduler()->SetAsmMode(m_asmMode);
+        }
+    }
 }
 
 Ptr<E2Termination>
@@ -1157,6 +1452,12 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageDu(std::string plmId, uint16_t nrCe
 
     uint32_t macPrbsCellSpecific = 0;
 
+    // [nsoran-qos] 139 was 100 MHz + numerology 2 (60 kHz SCS). Use actual RB count.
+    Ptr<MmWavePhyMacCommon> phyMacCfg = GetMac() ? GetMac()->GetConfigurationParameters() : nullptr;
+    long dlAvailablePrbs =
+        (phyMacCfg && phyMacCfg->GetNumRb() > 0) ? static_cast<long>(phyMacCfg->GetNumRb()) : 139;
+    long ulAvailablePrbs = dlAvailablePrbs;
+
     std::unordered_map<uint64_t, std::string> uePmStringDu{};
 
     for (auto ue : ueMap)
@@ -1206,13 +1507,12 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageDu(std::string plmId, uint16_t nrCe
         NS_LOG_DEBUG("macNumberOfSymbols " << macNumberOfSymbols << " denominatorPrb "
                                            << denominatorPrb);
 
-        // Average Number of PRBs allocated for the UE = (NR/DR)*139 (where 139 is the total number
-        // of PRBs available per NR cell, given numerology 2 with 60 kHz SCS)
+        // Average Number of PRBs allocated for the UE = (NR/DR)*N_RB
         double macPrb = 0;
         if (denominatorPrb != 0)
         {
-            macPrb = macNumberOfSymbols / denominatorPrb *
-                     139; // TODO fix this for different numerologies
+            // [nsoran-qos] was hardcoded 139 (100 MHz, numerology 2)
+            macPrb = macNumberOfSymbols / denominatorPrb * static_cast<double>(dlAvailablePrbs);
         }
         macPrbsCellSpecific += macPrb;
 
@@ -1349,8 +1649,7 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageDu(std::string plmId, uint16_t nrCe
 
     // Denominator = (Total number of rows (TTIs) within a given time window* 14)
     // Numerator = (Sum of number of symbols across all rows (TTIs) group by cell ID within a given
-    // time window) * 139 Average Number of PRBs allocated for the UE = (NR/DR) (where 139 is the
-    // total number of PRBs available per NR cell, given numerology 2 with 60 kHz SCS)
+    // time window) * N_RB
     double prbUtilizationDl = macPrbsCellSpecific;
     // double m_prbUtilizationDlAttr = prbUtilizationDl;
 
@@ -1373,8 +1672,6 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageDu(std::string plmId, uint16_t nrCe
         << macSinrBin5CellSpecific << " macSinrBin6CellSpecific " << macSinrBin6CellSpecific
         << " macSinrBin7CellSpecific " << macSinrBin7CellSpecific);
 
-    long dlAvailablePrbs = 139; // TODO this is for the current configuration, make it configurable
-    long ulAvailablePrbs = 139; // TODO this is for the current configuration, make it configurable
     long qci = 1;
     long dlPrbUsage = std::min((long)(prbUtilizationDl / dlAvailablePrbs * 100),
                                (long)100); // percentage of used PRBs

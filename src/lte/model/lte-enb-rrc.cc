@@ -4395,14 +4395,23 @@ LteEnbRrc::ComputeTtt(double sinrDifference)
 void
 LteEnbRrc::PerformHandover(uint64_t imsi)
 {
-    NS_ASSERT_MSG(m_imsiHandoverEventsMap.find(imsi) != m_imsiHandoverEventsMap.end(),
-                  "No handover event for this imsi!");
-    LteEnbRrc::HandoverEventInfo handoverInfo = m_imsiHandoverEventsMap.find(imsi)->second;
-    NS_ASSERT_MSG(
-        handoverInfo.sourceCellId == m_lastMmWaveCell[imsi],
-        "The secondary cell to which the UE is attached has changed handoverInfo.sourceCellId "
-            << handoverInfo.sourceCellId << " m_lastMmWaveCell[imsi] " << m_lastMmWaveCell[imsi]
-            << " imsi " << imsi);
+    HandoverEventMap::iterator hoIt = m_imsiHandoverEventsMap.find(imsi);
+    if (hoIt == m_imsiHandoverEventsMap.end())
+    {
+        NS_LOG_WARN("PerformHandover: no event for IMSI " << imsi << ", skip");
+        return;
+    }
+    LteEnbRrc::HandoverEventInfo handoverInfo = hoIt->second;
+    // ES eviction and DynamicTtt both queue PerformHandover. If another HO
+    // finished first, sourceCellId is stale; aborting here kills Gym episodes.
+    if (handoverInfo.sourceCellId != m_lastMmWaveCell[imsi])
+    {
+        NS_LOG_WARN("PerformHandover: skip stale event IMSI "
+                    << imsi << " scheduled source " << handoverInfo.sourceCellId
+                    << " current serving " << m_lastMmWaveCell[imsi]);
+        m_imsiHandoverEventsMap.erase(hoIt);
+        return;
+    }
     bool alreadyAssociatedImsi = false;
     bool onHandoverImsi = true;
     // On RecvRrcConnectionRequest for a new RNTI, the Lte Enb RRC stores the imsi
@@ -4472,6 +4481,16 @@ LteEnbRrc::TakeUeHoControl(uint64_t imsi)
     NS_LOG_FUNCTION(this);
     NS_LOG_INFO("UE " << +imsi << " has external HO control");
     m_e2ControlledUes.insert(imsi);
+    // Official TS (scenario-one / use_case=1) uses NoAuto so this map is empty.
+    // On scenario-three with DynamicTtt a TTT event may already be queued; if TS
+    // then changes serving cell, PerformHandover asserts sourceCellId mismatch.
+    // Same cancel used on outage and ES eviction.
+    HandoverEventMap::iterator handoverEvent = m_imsiHandoverEventsMap.find(imsi);
+    if (handoverEvent != m_imsiHandoverEventsMap.end())
+    {
+        handoverEvent->second.scheduledHandoverEvent.Cancel();
+        m_imsiHandoverEventsMap.erase(handoverEvent);
+    }
 }
 
 void
@@ -4723,7 +4742,7 @@ LteEnbRrc::TriggerUeAssociationUpdate()
                  ++cellIter)
             {
                 // check if the BS is barred from HOs and in case ignore it
-                if (m_allowHandoverTo.find(cellIter->first)->second)
+                if (IsHandoverAllowedTo(cellIter->first))
                 {
                     NS_LOG_INFO("Cell " << cellIter->first << " reports "
                                         << 10 * std::log10(cellIter->second));
@@ -6128,8 +6147,74 @@ LteEnbRrc::GetAllowHandoverTo()
     return m_allowHandoverTo;
 }
 
+bool
+LteEnbRrc::IsHandoverAllowedTo(uint16_t cellId) const
+{
+    auto entry = m_allowHandoverTo.find(cellId);
+    if (entry == m_allowHandoverTo.end())
+    {
+        return true;
+    }
+    return entry->second;
+}
+
+uint16_t
+LteEnbRrc::GetLastMmWaveCell(uint64_t imsi) const
+{
+    auto it = m_lastMmWaveCell.find(imsi);
+    if (it == m_lastMmWaveCell.end())
+    {
+        return 0;
+    }
+    return it->second;
+}
+
+uint16_t
+LteEnbRrc::GetBestAllowedMmWaveCell(uint64_t imsi) const
+{
+    auto imsiIter = m_imsiCellSinrMap.find(imsi);
+    if (imsiIter == m_imsiCellSinrMap.end())
+    {
+        return 0;
+    }
+    long double maxSinr = 0;
+    uint16_t maxSinrCellId = 0;
+    for (CellSinrMap::const_iterator cellIter = imsiIter->second.begin();
+         cellIter != imsiIter->second.end();
+         ++cellIter)
+    {
+        if (IsHandoverAllowedTo(cellIter->first) && cellIter->second > maxSinr)
+        {
+            maxSinr = cellIter->second;
+            maxSinrCellId = cellIter->first;
+        }
+    }
+    return maxSinrCellId;
+}
+
+uint16_t
+LteEnbRrc::ResolveTsHandoverTarget(uint64_t imsi, uint16_t requestedTarget) const
+{
+    uint16_t source = GetLastMmWaveCell(imsi);
+    if (IsHandoverAllowedTo(requestedTarget))
+    {
+        NS_LOG_INFO("TS HO allowed to cell " << requestedTarget << " for IMSI " << imsi);
+        return requestedTarget;
+    }
+    if (source != 0 && IsHandoverAllowedTo(source))
+    {
+        NS_LOG_WARN("TS target cell " << requestedTarget << " is barred, IMSI " << imsi
+                                      << " stays on serving cell " << source);
+        return source;
+    }
+    uint16_t fallback = GetBestAllowedMmWaveCell(imsi);
+    NS_LOG_WARN("TS target " << requestedTarget << " and serving " << source
+                             << " are barred for IMSI " << imsi << ", fallback cell " << fallback);
+    return fallback;
+}
+
 void
-LteEnbRrc::EvictUsersFromSecondaryCell()
+LteEnbRrc::EvictUsersFromSecondaryCell(const std::set<uint64_t>& skipImsis)
 {
     // Get the number of preambles to avoid their exaustion and the triggering of
     // HO preparation Failure
@@ -6153,12 +6238,10 @@ LteEnbRrc::EvictUsersFromSecondaryCell()
              ++imsiIter)
         {
             uint64_t imsi = imsiIter->first;
-
-            // if (m_e2ControlledUes.find (imsi) != m_e2ControlledUes.end ())
-            // {
-            //   // HO for this UE is controlled externally
-            //   continue;
-            // }
+            if (skipImsis.find(imsi) != skipImsis.end())
+            {
+                continue;
+            }
 
             long double maxSinr = 0;
             uint16_t maxSinrCellId = 0;
@@ -6178,8 +6261,7 @@ LteEnbRrc::EvictUsersFromSecondaryCell()
 
                 // get current cell
                 uint16_t cellId = m_lastMmWaveCell[imsi];
-                if (m_allowHandoverTo.find(cellId)->second ||
-                    (m_allowHandoverTo.find(cellId) == m_allowHandoverTo.end()))
+                if (IsHandoverAllowedTo(cellId))
                 {
                     // the user can still camp here, skip the rest of this for loop
                     continue;
@@ -6201,7 +6283,7 @@ LteEnbRrc::EvictUsersFromSecondaryCell()
                  ++cellIter)
             {
                 // check if the BS is barred from HOs and in case ignore it
-                if (m_allowHandoverTo.find(cellIter->first)->second)
+                if (IsHandoverAllowedTo(cellIter->first))
                 {
                     NS_LOG_INFO("Cell " << cellIter->first << " reports "
                                         << 10 * std::log10(cellIter->second));
@@ -6217,6 +6299,15 @@ LteEnbRrc::EvictUsersFromSecondaryCell()
                                          << 10 * std::log10(cellIter->second)
                                          << " but HO not allowed to");
                 }
+            }
+
+            if (maxSinrCellId == 0)
+            {
+                NS_LOG_WARN("No allowed mmWave to evict IMSI " << imsi << " from "
+                                                               << m_lastMmWaveCell[imsi]
+                                                               << ", switch user-plane to LTE");
+                SwitchUeDataToLte(imsi);
+                continue;
             }
 
             m_bestMmWaveCellForImsiMap[imsi] = maxSinrCellId;
@@ -6257,6 +6348,72 @@ LteEnbRrc::EvictUsersFromSecondaryCell()
             }
             scheduledHos++;
         }
+    }
+}
+
+void
+LteEnbRrc::SwitchUeDataToLte(uint64_t imsi)
+{
+    uint16_t rnti = GetRntiFromImsi(imsi);
+    if (rnti == 0 || !HasUeManager(rnti))
+    {
+        NS_LOG_WARN("Cannot switch IMSI " << imsi << " to LTE: no UE manager");
+        return;
+    }
+
+    HandoverEventMap::iterator handoverEvent = m_imsiHandoverEventsMap.find(imsi);
+    if (handoverEvent != m_imsiHandoverEventsMap.end())
+    {
+        handoverEvent->second.scheduledHandoverEvent.Cancel();
+        m_imsiHandoverEventsMap.erase(handoverEvent);
+    }
+
+    auto usingLte = m_imsiUsingLte.find(imsi);
+    if (usingLte != m_imsiUsingLte.end() && usingLte->second)
+    {
+        NS_LOG_INFO("IMSI " << imsi << " already on LTE user-plane");
+        return;
+    }
+
+    NS_LOG_UNCOND(Simulator::Now().GetMilliSeconds()
+                  << " ms IMSI " << imsi << " no allowed mmWave, switch user-plane to LTE");
+    m_imsiUsingLte[imsi] = true;
+    GetUeManager(rnti)->SendRrcConnectionSwitch(false);
+}
+
+void
+LteEnbRrc::ResumeUesFromLteToMmWaveCell(uint16_t cellId)
+{
+    if (!IsHandoverAllowedTo(cellId))
+    {
+        return;
+    }
+    for (auto it = m_imsiUsingLte.begin(); it != m_imsiUsingLte.end(); ++it)
+    {
+        uint64_t imsi = it->first;
+        if (!it->second)
+        {
+            continue;
+        }
+        if (GetLastMmWaveCell(imsi) != cellId)
+        {
+            continue;
+        }
+        uint16_t rnti = GetRntiFromImsi(imsi);
+        if (rnti == 0 || !HasUeManager(rnti))
+        {
+            continue;
+        }
+        HandoverEventMap::iterator handoverEvent = m_imsiHandoverEventsMap.find(imsi);
+        if (handoverEvent != m_imsiHandoverEventsMap.end())
+        {
+            handoverEvent->second.scheduledHandoverEvent.Cancel();
+            m_imsiHandoverEventsMap.erase(handoverEvent);
+        }
+        NS_LOG_UNCOND(Simulator::Now().GetMilliSeconds()
+                      << " ms IMSI " << imsi << " resume user-plane to mmWave cell " << cellId);
+        m_imsiUsingLte[imsi] = false;
+        GetUeManager(rnti)->SendRrcConnectionSwitch(true);
     }
 }
 
