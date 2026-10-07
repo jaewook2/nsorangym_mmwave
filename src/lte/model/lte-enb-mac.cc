@@ -1130,6 +1130,8 @@ LteEnbMac::DoSchedDlConfigInd(FfMacSchedSapUser::SchedDlConfigIndParameters ind)
             dlSchedulingCallbackInfo.mcsTb2 = 0;
             dlSchedulingCallbackInfo.sizeTb2 = 0;
             dlSchedulingCallbackInfo.componentCarrierId = m_componentCarrierId;
+            dlSchedulingCallbackInfo.nPrb = static_cast<uint16_t>(
+                __builtin_popcount(ind.m_buildDataList.at(i).m_dci.m_rbBitmap));
             m_dlScheduling(dlSchedulingCallbackInfo);
         }
         // Two TBs used
@@ -1144,6 +1146,8 @@ LteEnbMac::DoSchedDlConfigInd(FfMacSchedSapUser::SchedDlConfigIndParameters ind)
             dlSchedulingCallbackInfo.mcsTb2 = ind.m_buildDataList.at(i).m_dci.m_mcs.at(1);
             dlSchedulingCallbackInfo.sizeTb2 = ind.m_buildDataList.at(i).m_dci.m_tbsSize.at(1);
             dlSchedulingCallbackInfo.componentCarrierId = m_componentCarrierId;
+            dlSchedulingCallbackInfo.nPrb = static_cast<uint16_t>(
+                __builtin_popcount(ind.m_buildDataList.at(i).m_dci.m_rbBitmap));
             m_dlScheduling(dlSchedulingCallbackInfo);
         }
         else

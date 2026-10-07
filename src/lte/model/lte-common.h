@@ -238,6 +238,7 @@ struct DlSchedulingCallbackInfo
     uint8_t mcsTb2;             ///< MCS TB2
     uint16_t sizeTb2;           ///< size TB2
     uint8_t componentCarrierId; ///< component carrier ID
+    uint16_t nPrb;              ///< allocated DL PRBs (RBG bits in Type-0 bitmap)
 };
 
 /**

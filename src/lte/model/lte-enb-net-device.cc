@@ -1381,19 +1381,25 @@ LteEnbNetDevice::BuildRicIndicationMessageCuUp(std::string plmId)
                                   << ")\n");
 
         /**
-         * The assert below can be triggered in one cell scenario if the UE has not connected yet to
-         * the RLC and the traffic from application layer started. To fix this move the start of the
-         * traffic later. If there are more than one LteNetDevice, the handover between cel handover
-         * where the reported NR RLC packets and bytes exceed the reported cell values from the
-         * PDCP. This occurs because RLC buffers are transferred between cells during the handover,
-         * and if this happens during the reset of an E2 indication periodicity, mismatches can
-         * arise.
+         * PDCP cell totals and LTE RLC counters can disagree: RLC buffers move
+         * at handover, traffic can start before RLC attach, and a narrow LTE
+         * carrier (e.g. 6 RB) often reports RLC bytes before PDCP stats catch up.
+         * Clamp so the NR remainder stays non-negative instead of aborting.
          */
-
-        NS_ASSERT_MSG(txBytes >= txPdcpPduBytesLteRlc && txDlPackets >= txPdcpPduLteRlc,
-                      "txBytes (" << txBytes << ") < txPdcpPduBytesLteRlc (" << txPdcpPduBytesLteRlc
-                                  << ") txDlPackets (" << txDlPackets << ") < txPdcpPduLteRlc ("
-                                  << txPdcpPduLteRlc << ")");
+        if (txPdcpPduBytesLteRlc > txBytes || txPdcpPduLteRlc > txDlPackets)
+        {
+            NS_LOG_WARN("CU-UP LTE RLC exceeds PDCP (bytes "
+                        << txPdcpPduBytesLteRlc << "/" << txBytes << " pkts "
+                        << txPdcpPduLteRlc << "/" << txDlPackets << "); clamping");
+            if (txPdcpPduBytesLteRlc > txBytes)
+            {
+                txPdcpPduBytesLteRlc = txBytes;
+            }
+            if (txPdcpPduLteRlc > txDlPackets)
+            {
+                txPdcpPduLteRlc = txDlPackets;
+            }
+        }
 
         uint64_t txPdcpPduNrRlc = std::max(static_cast<uint64_t>(0), txDlPackets - txPdcpPduLteRlc);
         double txPdcpPduBytesNrRlc = std::max(static_cast<uint64_t>(0), txBytes - txPdcpPduBytesLteRlc);

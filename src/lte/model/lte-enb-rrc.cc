@@ -1033,15 +1033,17 @@ UeManager::ForwardRlcBuffers(Ptr<LteRlc> rlc,
         //{
         LtePdcpHeader pdcpHeader;
         uint32_t pos = 0;
+        std::vector<Ptr<Packet>> txonToForward;
         for (std::vector<Ptr<Packet>>::iterator it = txonBuffer.begin(); it != txonBuffer.end();
              ++it)
         {
             pos++;
-            if ((*it)->GetSize() > 3)
+            if ((*it) && (*it)->GetSize() >= 3)
             {
                 (*it)->PeekHeader(pdcpHeader);
                 NS_LOG_DEBUG("txonBuffer SEQ = " << pdcpHeader.GetSequenceNumber()
                                                  << " Size = " << (*it)->GetSize());
+                txonToForward.push_back((*it)->Copy());
             }
             else
             {
@@ -1062,55 +1064,57 @@ UeManager::ForwardRlcBuffers(Ptr<LteRlc> rlc,
                  it != rlcAmTransmittingBuffer.end();
                  ++it)
             {
-                if (it->second)
+                if (it->second && it->second->GetSize() >= 3)
                 {
                     NS_LOG_DEBUG(this << " add to forwarding buffer SEQ = " << it->first
                                       << " Ptr<Packet> = " << it->second);
-                    m_x2forwardingBuffer.push_back(it->second);
+                    m_x2forwardingBuffer.push_back(it->second->Copy());
                 }
             }
             NS_LOG_DEBUG(this << " ADDING TXONBUFFER OF RLC AM " << m_rnti
                               << " Size = " << txonBufferSize);
 
             Ptr<Packet> segmentedRlcsdu = rlcAm->GetSegmentedRlcsdu();
-            if (segmentedRlcsdu != NULL)
+            if (segmentedRlcsdu != NULL && segmentedRlcsdu->GetSize() >= 3)
             {
                 segmentedRlcsdu->PeekHeader(pdcpHeader);
                 NS_LOG_DEBUG(this << "SegmentedRlcSdu = " << segmentedRlcsdu->GetSize()
                                   << " SEQ = " << pdcpHeader.GetSequenceNumber());
-                // insert the complete version of the fragmented SDU to the front of txonBuffer.
-                txonBuffer.insert(txonBuffer.begin(), segmentedRlcsdu);
+                txonToForward.insert(txonToForward.begin(), segmentedRlcsdu->Copy());
             }
             m_x2forwardingBuffer.insert(m_x2forwardingBuffer.end(),
-                                        txonBuffer.begin(),
-                                        txonBuffer.end());
+                                        txonToForward.begin(),
+                                        txonToForward.end());
             m_x2forwardingBufferSize += rlcAm->GetTransmittingRlcSduBufferSize() + txonBufferSize;
 
             // Get the rlcAm
             std::vector<Ptr<Packet>> rlcAmTxedSduBuffer = rlcAm->GetTxedRlcSduBuffer();
             LtePdcpHeader pdcpHeader_1;
-            m_x2forwardingBuffer.at(0)->PeekHeader(pdcpHeader_1);
-            uint16_t i = 0;
-            for (std::vector<Ptr<Packet>>::iterator it = rlcAmTxedSduBuffer.begin();
-                 it != rlcAmTxedSduBuffer.end();
-                 ++it)
+            if (!m_x2forwardingBuffer.empty() && m_x2forwardingBuffer.at(0)
+                && m_x2forwardingBuffer.at(0)->GetSize() >= 3)
             {
-                if ((*it) != NULL)
+                m_x2forwardingBuffer.at(0)->PeekHeader(pdcpHeader_1);
+                uint16_t i = 0;
+                for (std::vector<Ptr<Packet>>::iterator it = rlcAmTxedSduBuffer.begin();
+                     it != rlcAmTxedSduBuffer.end();
+                     ++it)
                 {
-                    (*it)->PeekHeader(pdcpHeader);
-                    NS_LOG_DEBUG("rlcAmTxedSduBuffer SEQ = " << pdcpHeader.GetSequenceNumber()
-                                                             << " Size = " << (*it)->GetSize());
-
-                    // add the previous SDU of the forwarding buffer to the forwarding buffer.
-                    if (pdcpHeader.GetSequenceNumber() >= (pdcpHeader_1.GetSequenceNumber() - 2) &&
-                        pdcpHeader.GetSequenceNumber() <= (pdcpHeader_1.GetSequenceNumber()))
+                    if ((*it) != NULL && (*it)->GetSize() >= 3)
                     {
-                        NS_LOG_DEBUG("Added previous SDU to forwarding buffer SEQ = "
-                                     << pdcpHeader.GetSequenceNumber()
-                                     << " Size = " << (*it)->GetSize());
-                        m_x2forwardingBuffer.insert(m_x2forwardingBuffer.begin() + i,
-                                                    (*it)->Copy());
-                        ++i;
+                        (*it)->PeekHeader(pdcpHeader);
+                        NS_LOG_DEBUG("rlcAmTxedSduBuffer SEQ = " << pdcpHeader.GetSequenceNumber()
+                                                                 << " Size = " << (*it)->GetSize());
+
+                        if (pdcpHeader.GetSequenceNumber() >= (pdcpHeader_1.GetSequenceNumber() - 2) &&
+                            pdcpHeader.GetSequenceNumber() <= (pdcpHeader_1.GetSequenceNumber()))
+                        {
+                            NS_LOG_DEBUG("Added previous SDU to forwarding buffer SEQ = "
+                                         << pdcpHeader.GetSequenceNumber()
+                                         << " Size = " << (*it)->GetSize());
+                            m_x2forwardingBuffer.insert(m_x2forwardingBuffer.begin() + i,
+                                                        (*it)->Copy());
+                            ++i;
+                        }
                     }
                 }
             }
@@ -1119,7 +1123,7 @@ UeManager::ForwardRlcBuffers(Ptr<LteRlc> rlc,
         { // TransmittingBuffer is empty. Only copy TxonBuffer.
             NS_LOG_DEBUG(this << " ADDING TXONBUFFER OF RLC AM " << m_rnti
                               << " Size = " << txonBufferSize);
-            m_x2forwardingBuffer = txonBuffer;
+            m_x2forwardingBuffer = txonToForward;
             m_x2forwardingBufferSize += txonBufferSize;
         }
         //}
@@ -1168,7 +1172,7 @@ UeManager::ForwardRlcBuffers(Ptr<LteRlc> rlc,
         params.gtpTeid = gtpTeid;
         // Remove tags to get PDCP SDU from PDCP PDU.
         // Ptr<Packet> rlcSdu =  (*(m_x2forwardingBuffer.begin()))->Copy();
-        Ptr<Packet> rlcSdu = m_x2forwardingBuffer.at(0);
+        Ptr<Packet> rlcSdu = m_x2forwardingBuffer.at(0)->Copy();
         // Tags to be removed from rlcSdu (from outer to inner)
         // LteRlcSduStatusTag rlcSduStatusTag;
         // RlcTag  rlcTag; //rlc layer timestamp

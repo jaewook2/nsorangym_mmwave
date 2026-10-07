@@ -64,6 +64,7 @@
 #include <ns3/uinteger.h>
 
 #include <cctype>
+#include <exception>
 #include <fstream>
 #include <numeric>
 #include <sstream>
@@ -674,6 +675,10 @@ void
 MmWaveEnbNetDevice::SetAsmMode(uint8_t mode)
 {
     NS_ABORT_MSG_IF(mode < 1 || mode > 6, "ASM mode must be 1..6");
+    if (mode == m_asmMode)
+    {
+        return;
+    }
     uint8_t oldMode = m_asmMode;
     m_asmMode = mode;
     ApplyAsmToSchedulers();
@@ -808,6 +813,8 @@ MmWaveEnbNetDevice::ApplyAsmControlFile()
     }
 
     std::string line;
+    uint16_t lastPollMode = 0;
+    bool havePollMode = false;
     while (std::getline(csv, line))
     {
         if (line.empty())
@@ -829,7 +836,15 @@ MmWaveEnbNetDevice::ApplyAsmControlFile()
         {
             continue;
         }
-        long long timestampMs = std::stoll(field);
+        long long timestampMs = 0;
+        try
+        {
+            timestampMs = std::stoll(field);
+        }
+        catch (const std::exception&)
+        {
+            continue;
+        }
 
         if (!std::getline(lineStream, field, ','))
         {
@@ -838,14 +853,21 @@ MmWaveEnbNetDevice::ApplyAsmControlFile()
         uint16_t cellId = m_cellId;
         uint16_t mode = 0;
         std::string third;
-        if (std::getline(lineStream, third, ',') && !third.empty())
+        try
         {
-            cellId = static_cast<uint16_t>(std::stoi(field));
-            mode = static_cast<uint16_t>(std::stoi(third));
+            if (std::getline(lineStream, third, ',') && !third.empty())
+            {
+                cellId = static_cast<uint16_t>(std::stoi(field));
+                mode = static_cast<uint16_t>(std::stoi(third));
+            }
+            else
+            {
+                mode = static_cast<uint16_t>(std::stoi(field));
+            }
         }
-        else
+        catch (const std::exception&)
         {
-            mode = static_cast<uint16_t>(std::stoi(field));
+            continue;
         }
 
         if (cellId != 0 && cellId != m_cellId)
@@ -877,8 +899,13 @@ MmWaveEnbNetDevice::ApplyAsmControlFile()
         }
         else
         {
-            SetAsmMode(static_cast<uint8_t>(mode));
+            lastPollMode = mode;
+            havePollMode = true;
         }
+    }
+    if (havePollMode)
+    {
+        SetAsmMode(static_cast<uint8_t>(lastPollMode));
     }
 }
 

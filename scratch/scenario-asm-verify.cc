@@ -1,8 +1,14 @@
 /* -*-  Mode: C++; c-file-style: "gnu"; indent-tabs-mode:nil; -*- */
 /*
  * [nsoran-asm] ASM verification:
- *   1 LTE eNB at origin, 2 mmWave gNBs left/right, 30 UEs randomly placed.
- *   Traffic: 10 UEs 10Mbps, 10 UEs 2Mbps, 10 UEs 500kbps (CBR UDP DL).
+ *   1 LTE eNB at origin, mmWave gNBs along x (default 2: left/right).
+ *   nMmWaveEnb=3 places a third gNB at the LTE (x,y); mmWaveLteZOffset
+ *   raises its z so the two radios are not at the same point.
+ *   Default UE layout: cluster around each gNB (left ~ASM 2 load, right ~ASM 4).
+ *   ueClusterSidesOnly clusters only on the leftmost/rightmost gNBs.
+ *   LTE eNB is 6 RB / 1.4 MHz so it cannot carry the cluster load; mmWave stays 20 MHz.
+ *   configuration=2 (28 GHz) isolates the two clusters so OFF dumps to LTE, not the other gNB.
+ *   Optional --uePlacement=random keeps the old rectangle + high/mid/low mix.
  *
  * Runtime ASM timeline (absolute time in ms). CSV:
  *   timestampMs,cellId,asmMode
@@ -21,6 +27,8 @@
  */
 
 #include "ns3/applications-module.h"
+#include "ns3/cc-helper.h"
+#include "ns3/component-carrier.h"
 #include "ns3/core-module.h"
 #include "ns3/internet-module.h"
 #include "ns3/lte-enb-net-device.h"
@@ -382,7 +390,7 @@ PrintUeAttachment (std::string filename, NodeContainer ueNodes, NetDeviceContain
     }
 }
 
-static ns3::GlobalValue g_nUe ("nUe", "Total number of UEs (random placement)",
+static ns3::GlobalValue g_nUe ("nUe", "Total number of UEs",
                                ns3::UintegerValue (30), ns3::MakeUintegerChecker<uint32_t> (1));
 static ns3::GlobalValue g_ues ("ues", "Total number of UEs (NsOranEnv datalake key)",
                                ns3::UintegerValue (30), ns3::MakeUintegerChecker<uint32_t> (1));
@@ -393,6 +401,14 @@ static ns3::GlobalValue g_gnbDistance (
     "gnbDistance",
     "Distance (m) from the center LTE eNB to each side mmWave gNB.",
     ns3::DoubleValue (200.0), ns3::MakeDoubleChecker<double> (20.0, 5000.0));
+static ns3::GlobalValue g_mmWaveLteZOffset (
+    "mmWaveLteZOffset",
+    "If a mmWave gNB shares the LTE (x,y), add this many metres to z.",
+    ns3::DoubleValue (0.5), ns3::MakeDoubleChecker<double> (0.0, 20.0));
+static ns3::GlobalValue g_ueClusterSidesOnly (
+    "ueClusterSidesOnly",
+    "If true, cluster UEs only around the leftmost and rightmost mmWave gNBs.",
+    ns3::BooleanValue (false), ns3::MakeBooleanChecker ());
 static ns3::GlobalValue g_simTime ("simTime", "Simulation time in seconds", ns3::DoubleValue (10.0),
                                    ns3::MakeDoubleChecker<double> (0.2, 100.0));
 static ns3::GlobalValue g_indicationPeriodicity (
@@ -426,8 +442,24 @@ static ns3::GlobalValue g_rateHigh ("rateHigh", "CBR rate for high-load UEs (10 
                                     ns3::StringValue ("10Mbps"), ns3::MakeStringChecker ());
 static ns3::GlobalValue g_rateMid ("rateMid", "CBR rate for mid-load UEs (10 of 30)",
                                    ns3::StringValue ("2Mbps"), ns3::MakeStringChecker ());
-static ns3::GlobalValue g_rateLow ("rateLow", "CBR rate for low-load UEs (10 of 30)",
+static ns3::GlobalValue g_rateLow ("rateLow", "CBR rate for low-load UEs (10 of 30, random layout)",
                                    ns3::StringValue ("500kbps"), ns3::MakeStringChecker ());
+static ns3::GlobalValue g_uePlacement (
+    "uePlacement",
+    "UE layout: cluster around each mmWave gNB, or random rectangle.",
+    ns3::StringValue ("cluster"), ns3::MakeStringChecker ());
+static ns3::GlobalValue g_ueClusterRadius (
+    "ueClusterRadius",
+    "Cluster radius (m) around each mmWave gNB when uePlacement=cluster.",
+    ns3::DoubleValue (25.0), ns3::MakeDoubleChecker<double> (1.0, 500.0));
+static ns3::GlobalValue g_rateLeft (
+    "rateLeft",
+    "CBR rate for UEs clustered at the left mmWave gNB (heavier, ~ASM 2).",
+    ns3::StringValue ("2Mbps"), ns3::MakeStringChecker ());
+static ns3::GlobalValue g_rateRight (
+    "rateRight",
+    "CBR rate for UEs clustered at the right mmWave gNB (lighter, ~ASM 4).",
+    ns3::StringValue ("600kbps"), ns3::MakeStringChecker ());
 static ns3::GlobalValue g_bufferSize ("bufferSize", "RLC tx buffer size (MB)",
                                       ns3::UintegerValue (10),
                                       ns3::MakeUintegerChecker<uint32_t> ());
@@ -462,6 +494,42 @@ static ns3::GlobalValue g_tputPeriod (
     "tputPeriod",
     "LTE vs mmWave PDCP throughput sample period in seconds.",
     ns3::DoubleValue (0.05), ns3::MakeDoubleChecker<double> (0.01, 2.0));
+static ns3::GlobalValue g_lteBandwidthRbs (
+    "lteBandwidthRbs",
+    "LTE eNB bandwidth in RBs (6=1.4MHz, 15=3, 25=5, 50=10, 75=15, 100=20). mmWave BW unchanged.",
+    ns3::UintegerValue (6), ns3::MakeUintegerChecker<uint16_t> (6, 100));
+
+static uint32_t
+ClusterIndexForUe (uint32_t u, uint32_t nUe, uint32_t nGnb)
+{
+  if (nGnb <= 1)
+    {
+      return 0;
+    }
+  uint32_t nEach = nUe / nGnb;
+  uint32_t rem = nUe % nGnb;
+  uint32_t start = 0;
+  for (uint32_t g = 0; g < nGnb; ++g)
+    {
+      uint32_t nThis = nEach + (g < rem ? 1 : 0);
+      if (u < start + nThis)
+        {
+          return g;
+        }
+      start += nThis;
+    }
+  return nGnb - 1;
+}
+
+static uint32_t
+ClusterGnbIndexForUe (uint32_t u, uint32_t nUe, uint32_t nGnb, bool sidesOnly)
+{
+  if (sidesOnly && nGnb >= 2)
+    {
+      return ClusterIndexForUe (u, nUe, 2) == 0 ? 0 : (nGnb - 1);
+    }
+  return ClusterIndexForUe (u, nUe, nGnb);
+}
 
 int
 main (int argc, char *argv[])
@@ -497,6 +565,18 @@ main (int argc, char *argv[])
   std::string rateMid = stringValue.Get ();
   GlobalValue::GetValueByName ("rateLow", stringValue);
   std::string rateLow = stringValue.Get ();
+  GlobalValue::GetValueByName ("uePlacement", stringValue);
+  std::string uePlacement = stringValue.Get ();
+  GlobalValue::GetValueByName ("ueClusterRadius", doubleValue);
+  double ueClusterRadius = doubleValue.Get ();
+  GlobalValue::GetValueByName ("mmWaveLteZOffset", doubleValue);
+  double mmWaveLteZOffset = doubleValue.Get ();
+  GlobalValue::GetValueByName ("ueClusterSidesOnly", booleanValue);
+  bool ueClusterSidesOnly = booleanValue.Get ();
+  GlobalValue::GetValueByName ("rateLeft", stringValue);
+  std::string rateLeft = stringValue.Get ();
+  GlobalValue::GetValueByName ("rateRight", stringValue);
+  std::string rateRight = stringValue.Get ();
   GlobalValue::GetValueByName ("ueAreaY", doubleValue);
   double ueAreaY = doubleValue.Get ();
   GlobalValue::GetValueByName ("ueAreaXPad", doubleValue);
@@ -614,16 +694,46 @@ main (int argc, char *argv[])
   Config::SetDefault ("ns3::MmWavePhyMacCommon::Bandwidth", DoubleValue (bandwidth));
   Config::SetDefault ("ns3::MmWavePhyMacCommon::CenterFreq", DoubleValue (centerFrequency));
 
+  GlobalValue::GetValueByName ("lteBandwidthRbs", uintegerValue);
+  uint16_t lteBandwidthRbs = uintegerValue.Get ();
+  switch (lteBandwidthRbs)
+    {
+    case 6:
+    case 15:
+    case 25:
+    case 50:
+    case 75:
+    case 100:
+      break;
+    default:
+      NS_FATAL_ERROR ("lteBandwidthRbs must be 6, 15, 25, 50, 75, or 100");
+    }
+
   NS_LOG_UNCOND ("ASM verify: asmMode=" << unsigned (asmMode) << " nMmWaveEnb=" << nMmWaveEnbNodes
                                         << " nUe=" << nUeNodes << " gnbDistance=" << gnbDistance
-                                        << " m rates=" << rateHigh << "/" << rateMid << "/"
-                                        << rateLow << " freq=" << centerFrequency / 1e9
-                                        << " GHz bw=" << bandwidth / 1e6
-                                        << " MHz controlFile=" << controlFileNameAsm
+                                        << " m placement=" << uePlacement
+                                        << " clusterR=" << ueClusterRadius
+                                        << " rates=" << rateHigh << "/" << rateMid << "/"
+                                        << rateLow << " left/right=" << rateLeft << "/" << rateRight
+                                        << " freq=" << centerFrequency / 1e9
+                                        << " GHz mmWaveBw=" << bandwidth / 1e6
+                                        << " MHz lteRbs=" << lteBandwidthRbs
+                                        << " controlFile=" << controlFileNameAsm
                                         << " scheduleAsm=" << scheduleAsmControl
                                         << " useSemaphores=" << useSemaphores);
 
   Ptr<MmWaveHelper> mmwaveHelper = CreateObject<MmWaveHelper> ();
+  {
+    Ptr<CcHelper> lteCcHelper = CreateObject<CcHelper> ();
+    lteCcHelper->SetNumberOfComponentCarriers (1);
+    lteCcHelper->SetUlEarfcn (18100);
+    lteCcHelper->SetDlEarfcn (100);
+    lteCcHelper->SetDlBandwidth (lteBandwidthRbs);
+    lteCcHelper->SetUlBandwidth (lteBandwidthRbs);
+    std::map<uint8_t, ComponentCarrier> lteCcMap = lteCcHelper->EquallySpacedCcs ();
+    lteCcMap.at (0).SetAsPrimary (true);
+    mmwaveHelper->SetLteCcPhyParams (lteCcMap);
+  }
   mmwaveHelper->SetPathlossModelType ("ns3::ThreeGppUmiStreetCanyonPropagationLossModel");
   mmwaveHelper->SetChannelConditionModelType ("ns3::ThreeGppUmiStreetCanyonChannelConditionModel");
   mmwaveHelper->SetUePhasedArrayModelAttribute ("NumColumns",
@@ -684,6 +794,15 @@ main (int argc, char *argv[])
           mmWavePositions.push_back (Vector (x, 0.0, 10.0));
         }
     }
+  for (auto &pos : mmWavePositions)
+    {
+      double dx = pos.x - ltePos.x;
+      double dy = pos.y - ltePos.y;
+      if ((dx * dx + dy * dy) < 1e-12)
+        {
+          pos.z = ltePos.z + mmWaveLteZOffset;
+        }
+    }
 
   Ptr<ListPositionAllocator> enbPositionAlloc = CreateObject<ListPositionAllocator> ();
   enbPositionAlloc->Add (ltePos);
@@ -696,26 +815,47 @@ main (int argc, char *argv[])
   enbmobility.SetPositionAllocator (enbPositionAlloc);
   enbmobility.Install (allEnbNodes);
 
-  Ptr<UniformRandomVariable> xUv = CreateObject<UniformRandomVariable> ();
-  xUv->SetAttribute ("Min", DoubleValue (-gnbDistance - ueAreaXPad));
-  xUv->SetAttribute ("Max", DoubleValue (gnbDistance + ueAreaXPad));
-  Ptr<UniformRandomVariable> yUv = CreateObject<UniformRandomVariable> ();
-  yUv->SetAttribute ("Min", DoubleValue (-ueAreaY));
-  yUv->SetAttribute ("Max", DoubleValue (ueAreaY));
-  Ptr<RandomRectanglePositionAllocator> uePositionAlloc =
-      CreateObject<RandomRectanglePositionAllocator> ();
-  uePositionAlloc->SetX (xUv);
-  uePositionAlloc->SetY (yUv);
   MobilityHelper uemobility;
   uemobility.SetMobilityModel ("ns3::ConstantPositionMobilityModel");
-  uemobility.SetPositionAllocator (uePositionAlloc);
-  uemobility.Install (ueNodes);
-  for (uint32_t u = 0; u < ueNodes.GetN (); ++u)
+  const bool clusterUes = (uePlacement != "random");
+  if (clusterUes)
     {
-      Ptr<MobilityModel> mob = ueNodes.Get (u)->GetObject<MobilityModel> ();
-      Vector p = mob->GetPosition ();
-      p.z = 1.5;
-      mob->SetPosition (p);
+      Ptr<UniformRandomVariable> rUv = CreateObject<UniformRandomVariable> ();
+      Ptr<UniformRandomVariable> thUv = CreateObject<UniformRandomVariable> ();
+      Ptr<ListPositionAllocator> uePositionAlloc = CreateObject<ListPositionAllocator> ();
+      for (uint32_t u = 0; u < nUeNodes; ++u)
+        {
+          uint32_t gnbIdx =
+              ClusterGnbIndexForUe (u, nUeNodes, nMmWaveEnbNodes, ueClusterSidesOnly);
+          Vector c = mmWavePositions[gnbIdx];
+          double r = ueClusterRadius * std::sqrt (rUv->GetValue (0.0, 1.0));
+          double th = thUv->GetValue (0.0, 2.0 * M_PI);
+          uePositionAlloc->Add (Vector (c.x + r * std::cos (th), c.y + r * std::sin (th), 1.5));
+        }
+      uemobility.SetPositionAllocator (uePositionAlloc);
+      uemobility.Install (ueNodes);
+    }
+  else
+    {
+      Ptr<UniformRandomVariable> xUv = CreateObject<UniformRandomVariable> ();
+      xUv->SetAttribute ("Min", DoubleValue (-gnbDistance - ueAreaXPad));
+      xUv->SetAttribute ("Max", DoubleValue (gnbDistance + ueAreaXPad));
+      Ptr<UniformRandomVariable> yUv = CreateObject<UniformRandomVariable> ();
+      yUv->SetAttribute ("Min", DoubleValue (-ueAreaY));
+      yUv->SetAttribute ("Max", DoubleValue (ueAreaY));
+      Ptr<RandomRectanglePositionAllocator> uePositionAlloc =
+          CreateObject<RandomRectanglePositionAllocator> ();
+      uePositionAlloc->SetX (xUv);
+      uePositionAlloc->SetY (yUv);
+      uemobility.SetPositionAllocator (uePositionAlloc);
+      uemobility.Install (ueNodes);
+      for (uint32_t u = 0; u < ueNodes.GetN (); ++u)
+        {
+          Ptr<MobilityModel> mob = ueNodes.Get (u)->GetObject<MobilityModel> ();
+          Vector p = mob->GetPosition ();
+          p.z = 1.5;
+          mob->SetPosition (p);
+        }
     }
 
   NetDeviceContainer lteEnbDevs = mmwaveHelper->InstallLteEnbDevice (lteEnbNodes);
@@ -758,7 +898,8 @@ main (int argc, char *argv[])
               static_cast<uint32_t> (std::max (0, g_sched->GetAvailableDataSymbols ()));
         }
       NS_LOG_UNCOND ("mmWave cellId=" << gnb->GetCellId () << " pos=(" << mmWavePositions[i].x
-                                      << "," << mmWavePositions[i].y << ") AsmMode="
+                                      << "," << mmWavePositions[i].y << ","
+                                      << mmWavePositions[i].z << ") AsmMode="
                                       << unsigned (gnb->GetAsmMode ()));
     }
   NS_LOG_UNCOND ("LTE cellId=" << lteEnb->GetCellId () << " at (0,0,10) availableDataSymbols="
@@ -778,24 +919,56 @@ main (int argc, char *argv[])
   classPool.insert (classPool.end (), nHigh, 0);
   classPool.insert (classPool.end (), nMid, 1);
   classPool.insert (classPool.end (), nLow, 2);
-  Ptr<UniformRandomVariable> shuffleUv = CreateObject<UniformRandomVariable> ();
-  for (uint32_t i = classPool.size (); i > 1; --i)
+  if (!clusterUes)
     {
-      uint32_t j = shuffleUv->GetInteger (0, i - 1);
-      std::swap (classPool[i - 1], classPool[j]);
+      Ptr<UniformRandomVariable> shuffleUv = CreateObject<UniformRandomVariable> ();
+      for (uint32_t i = classPool.size (); i > 1; --i)
+        {
+          uint32_t j = shuffleUv->GetInteger (0, i - 1);
+          std::swap (classPool[i - 1], classPool[j]);
+        }
     }
   std::ofstream classLog ("ue-app-class.txt");
-  classLog << "imsi,appClass,appRate,x,y" << std::endl;
+  classLog << "imsi,appClass,appRate,x,y,clusterGnb" << std::endl;
   const char *clsName[] = {"high", "mid", "low"};
+  uint32_t nLeft = 0;
+  uint32_t nRight = 0;
   for (uint32_t u = 0; u < ueNodes.GetN (); ++u)
     {
-      uint8_t cls = classPool[u];
-      std::string rate = (cls == 0) ? rateHigh : (cls == 1) ? rateMid : rateLow;
+      uint32_t gnbIdx =
+          ClusterGnbIndexForUe (u, nUeNodes, nMmWaveEnbNodes, ueClusterSidesOnly);
+      uint8_t cls;
+      std::string rate;
+      if (clusterUes)
+        {
+          bool left = (gnbIdx == 0);
+          cls = left ? 0 : 2;
+          rate = left ? rateLeft : rateRight;
+          if (!ueClusterSidesOnly && nMmWaveEnbNodes > 2 && gnbIdx > 0
+              && gnbIdx + 1 < nMmWaveEnbNodes)
+            {
+              cls = 1;
+              rate = rateMid;
+            }
+          if (left)
+            {
+              ++nLeft;
+            }
+          else
+            {
+              ++nRight;
+            }
+        }
+      else
+        {
+          cls = classPool[u];
+          rate = (cls == 0) ? rateHigh : (cls == 1) ? rateMid : rateLow;
+        }
       g_ueClass[u] = cls;
       g_ueRate[u] = rate;
       Vector pos = ueNodes.Get (u)->GetObject<MobilityModel> ()->GetPosition ();
       classLog << (u + 1) << "," << clsName[cls] << "," << rate << "," << pos.x << "," << pos.y
-               << std::endl;
+               << "," << (gnbIdx + 2) << std::endl;
       sinkApp.Add (dlPacketSinkHelper.Install (ueNodes.Get (u)));
       OnOffHelper fullBuffer ("ns3::UdpSocketFactory",
                               InetSocketAddress (ueIpIface.GetAddress (u), 1234));
@@ -806,7 +979,15 @@ main (int argc, char *argv[])
       clientApp.Add (fullBuffer.Install (remoteHost));
     }
   classLog.close ();
-  NS_LOG_UNCOND ("UE classes high/mid/low = " << nHigh << "/" << nMid << "/" << nLow);
+  if (clusterUes)
+    {
+      NS_LOG_UNCOND ("UE clusters left/right = " << nLeft << "/" << nRight
+                                                << " rates=" << rateLeft << "/" << rateRight);
+    }
+  else
+    {
+      NS_LOG_UNCOND ("UE classes high/mid/low = " << nHigh << "/" << nMid << "/" << nLow);
+    }
 
   GlobalValue::GetValueByName ("simTime", doubleValue);
   double simTime = doubleValue.Get ();
