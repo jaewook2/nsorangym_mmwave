@@ -96,6 +96,15 @@ class MmWaveEnbNetDevice : public MmWaveNetDevice
 
     void SetAsmMode(uint8_t mode);
     uint8_t GetAsmMode() const;
+    /** 0 Stable, 1 Deactivating, 2 Waking. Meaningful when AsmStateMachine is set. */
+    uint8_t GetAsmPhase() const;
+    uint8_t GetAsmTarget() const;
+    /** Average ASM power since the previous call, in watts. Resets the integrator. */
+    double ConsumeAveragePowerW(double periodSec);
+    /** Last value returned by ConsumeAveragePowerW. Does not reset the integrator. */
+    double GetLastAveragePowerW() const;
+    /** True when this cell writes DU/CU KPMs to du-cell-*.txt. */
+    bool LogsKpmToFile() const;
     /**
      * [nsoran-asm] Read ControlFileNameAsm CSV and apply/schedule ASM updates.
      * Format: timestampMs,cellId,asmMode  (cellId 0 = this cell)
@@ -214,6 +223,38 @@ class MmWaveEnbNetDevice : public MmWaveNetDevice
     uint8_t m_Bandwidth; /* bandwidth in RBs (?) */
 
     uint8_t m_asmMode = 1;
+    bool m_asmStateMachine = false;
+    uint8_t m_asmCurrent = 1;
+    uint8_t m_asmTarget = 1;
+    uint8_t m_asmPhase = 0;
+    Time m_asmTransStart;
+    Time m_asmTransEnd;
+    Time m_paOff;
+    Time m_rfOff;
+    Time m_bbOff;
+    Time m_controlToMinimal;
+    Time m_minimalOff;
+    Time m_offToMinimal;
+    Time m_minimalToControl;
+    Time m_bbOn;
+    Time m_rfOn;
+    Time m_paOn;
+    double m_rfPower = 0.0;
+    double m_bbPower = 0.0;
+    double m_controlPower = 0.0;
+    double m_minimalPower = 0.0;
+    double m_paWakePower = 0.0;
+    double m_rfWakePower = 0.0;
+    double m_bbWakePower = 0.0;
+    double m_controlWakePower = 0.0;
+    double m_minimalWakePower = 0.0;
+    double m_energyJ = 0.0;
+    double m_cachedPower = 0.0;
+    double m_lastAveragePowerW = 0.0;
+    Time m_energyTime;
+    Time m_lastSlotSeen;
+    bool m_energyInit = false;
+    bool m_slotSeen = false;
     std::string m_asmControlFilename;
     bool m_scheduleAsmControl = true;
     bool m_flushAsmControlFile = false;
@@ -223,6 +264,21 @@ class MmWaveEnbNetDevice : public MmWaveNetDevice
     void ApplyAsmControlFile();
     void ApplyAsmTurnOff();
     void ApplyAsmTurnOn();
+    void AsmCommandTarget(uint8_t mode);
+    void AsmOnSlotStart();
+    void AsmInstallSlotHook();
+    void AsmApplyDataGate();
+    void AsmCompleteTransition();
+    void AsmTouchEnergy();
+    void AsmScheduleEnergySamples();
+    Time AsmOffDuration(int boundary) const;
+    Time AsmOnDuration(int boundary) const;
+    Time AsmTransitionDuration(int fromDepth, int toDepth) const;
+    double AsmTxPowerW() const;
+    double AsmStablePowerW(uint8_t mode) const;
+    double AsmOffIntervalPowerW(int fromDepth, int boundary) const;
+    double AsmOnIntervalPowerW(int boundary) const;
+    double AsmPowerW() const;
     Ptr<LteEnbRrc> FindMasterLteRrc() const;
     void LogAsmModeChange(uint8_t oldMode, uint8_t newMode);
 

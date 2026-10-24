@@ -201,13 +201,48 @@ ReportPathThroughput (Ptr<LteEnbNetDevice> lteEnb, ApplicationContainer sinks, d
   uint64_t dApp = (appTotal >= *lastApp) ? (appTotal - *lastApp) : appTotal;
   *lastApp = appTotal;
   std::ostringstream modeStr;
+  std::ostringstream stateStr;
+  std::ostringstream dataSymStr;
+  std::ostringstream cellPowerStr;
+  double asmPowerW = 0.0;
   for (uint32_t i = 0; i < g_gnbs.size (); ++i)
     {
       if (i > 0)
         {
           modeStr << ";";
+          stateStr << ";";
+          dataSymStr << ";";
         }
       modeStr << g_gnbs[i]->GetCellId () << ":" << unsigned (g_gnbs[i]->GetAsmMode ());
+      stateStr << g_gnbs[i]->GetCellId () << ":" << unsigned (g_gnbs[i]->GetAsmPhase ()) << ":"
+               << unsigned (g_gnbs[i]->GetAsmTarget ());
+      int dataSym = 0;
+      auto ccMap = g_gnbs[i]->GetCcMap ();
+      if (!ccMap.empty ())
+        {
+          Ptr<MmWaveComponentCarrierEnb> cc =
+              DynamicCast<MmWaveComponentCarrierEnb> (ccMap.begin ()->second);
+          if (cc && cc->GetMacScheduler ())
+            {
+              dataSym = cc->GetMacScheduler ()->GetAvailableDataSymbols ();
+            }
+        }
+      dataSymStr << g_gnbs[i]->GetCellId () << ":" << dataSym;
+      double cellW = 0.0;
+      if (g_gnbs[i]->LogsKpmToFile ())
+        {
+          cellW = g_gnbs[i]->GetLastAveragePowerW ();
+        }
+      else
+        {
+          cellW = g_gnbs[i]->ConsumeAveragePowerW (periodSec);
+        }
+      if (i > 0)
+        {
+          cellPowerStr << ";";
+        }
+      cellPowerStr << g_gnbs[i]->GetCellId () << ":" << cellW;
+      asmPowerW += cellW;
     }
   double lteKbps = dLte * 8.0 / 1e3 / periodSec;
   double mmwKbps = dMmw * 8.0 / 1e3 / periodSec;
@@ -218,7 +253,8 @@ ReportPathThroughput (Ptr<LteEnbNetDevice> lteEnb, ApplicationContainer sinks, d
     {
       g_tputLog << Simulator::Now ().GetMilliSeconds () << "," << modeStr.str () << "," << dLte
                 << "," << dMmw << "," << lteKbps << "," << mmwKbps << "," << lteFrac << "," << dApp
-                << "," << appKbps << std::endl;
+                << "," << appKbps << "," << stateStr.str () << "," << asmPowerW << ","
+                << dataSymStr.str () << "," << cellPowerStr.str () << std::endl;
     }
   NS_LOG_UNCOND (Simulator::Now ().GetMilliSeconds ()
                  << " ms ASM " << modeStr.str () << " PDCP LTE " << lteKbps << " kbps mmWave "
@@ -423,14 +459,69 @@ static ns3::GlobalValue g_controlMode (
     "controlMode",
     "LTE control use case. Gym ASM uses 'asm'.",
     ns3::StringValue (""), ns3::MakeStringChecker ());
+static ns3::GlobalValue g_handoverMode (
+    "handoverMode",
+    "Secondary cell handover: NoAuto, FixedTtt, DynamicTtt, or Threshold.",
+    ns3::StringValue ("NoAuto"), ns3::MakeStringChecker ());
 static ns3::GlobalValue g_controlFileName (
     "controlFileName",
     "LTE control CSV path (Gym handshake). For ASM this can match controlFileNameAsm.",
     ns3::StringValue (""), ns3::MakeStringChecker ());
 static ns3::GlobalValue g_asmMode (
     "asmMode",
-    "ASM data duty for mmWave gNB: 1=100%, 2=75%, 3=50%, 4=25%, 5=0% data, 6=TurnOff.",
+    "duty_mode for mmWave gNB: 1=100%, 2=75%, 3=50%, 4=25%, 5=0% data, 6=TurnOff. "
+    "With asmStateMachine, 1=Active, 2=ASM1, 3=ASM2, 4=ASM3, 5=ASM4, 6=OFF.",
     ns3::UintegerValue (1), ns3::MakeUintegerChecker<uint8_t> (1, 6));
+static ns3::GlobalValue g_asmStateMachine (
+    "asmStateMachine",
+    "If true, asmMode is an ASM target and ns-3 runs component transitions.",
+    ns3::BooleanValue (false), ns3::MakeBooleanChecker ());
+// Salem et al., IEEE NCA 2019, Table I (IMEC/Debaillie sleep levels). On equals off.
+// PA 35.5 us (SM1), RF 0.5 ms (SM2), BB 5 ms (SM3), Control/Minimal 0.5 s (SM4).
+// Minimal to OFF is not in that table; it reuses the SM4 0.5 s class.
+static ns3::GlobalValue g_asmPaOffTime ("asmPaOffTime", "Seconds to turn the PA off.",
+                                        ns3::DoubleValue (35.5e-6), ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmRfOffTime ("asmRfOffTime", "Seconds to turn RF off.",
+                                        ns3::DoubleValue (0.5e-3), ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmBbOffTime ("asmBbOffTime", "Seconds to turn the baseband off.",
+                                        ns3::DoubleValue (5e-3), ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmControlToMinimalTime (
+    "asmControlToMinimalTime", "Seconds to reduce Control to Minimal.", ns3::DoubleValue (0.5),
+    ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmMinimalOffTime ("asmMinimalOffTime", "Seconds for Minimal to reach OFF.",
+                                             ns3::DoubleValue (0.5), ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmOffToMinimalTime ("asmOffToMinimalTime", "Seconds to raise OFF to Minimal.",
+                                               ns3::DoubleValue (0.5), ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmMinimalToControlTime (
+    "asmMinimalToControlTime", "Seconds to raise Minimal to Control.", ns3::DoubleValue (0.5),
+    ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmBbOnTime ("asmBbOnTime", "Seconds to turn the baseband on.",
+                                       ns3::DoubleValue (5e-3), ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmRfOnTime ("asmRfOnTime", "Seconds to turn RF on.", ns3::DoubleValue (0.5e-3),
+                                       ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmPaOnTime ("asmPaOnTime", "Seconds to turn the PA on.",
+                                       ns3::DoubleValue (35.5e-6), ns3::MakeDoubleChecker<double> ());
+// Pico sleep totals (Onireti, PIMRC 2017): SM1 1.51, SM2 0.368, SM3 0.301, SM4 0.238 W.
+// Control and Minimal are alternatives, so Control is the SM3 total and Minimal the SM4 total.
+// Wake power is twice the operating power of that component. PA wake is twice 1 W TxPower.
+static ns3::GlobalValue g_asmRfPower ("asmRfPower", "RF operating power in watts.",
+                                      ns3::DoubleValue (1.142), ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmBbPower ("asmBbPower", "Baseband operating power in watts.",
+                                      ns3::DoubleValue (0.067), ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmControlPower ("asmControlPower", "Control operating power in watts.",
+                                           ns3::DoubleValue (0.301), ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmMinimalPower ("asmMinimalPower", "Minimal operating power in watts.",
+                                           ns3::DoubleValue (0.238), ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmPaWakePower ("asmPaWakePower", "PA wake power in watts.",
+                                          ns3::DoubleValue (2.0), ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmRfWakePower ("asmRfWakePower", "RF wake power in watts.",
+                                          ns3::DoubleValue (2.284), ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmBbWakePower ("asmBbWakePower", "Baseband wake power in watts.",
+                                          ns3::DoubleValue (0.134), ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmControlWakePower ("asmControlWakePower", "Control wake power in watts.",
+                                               ns3::DoubleValue (0.602), ns3::MakeDoubleChecker<double> ());
+static ns3::GlobalValue g_asmMinimalWakePower ("asmMinimalWakePower", "Minimal wake power in watts.",
+                                               ns3::DoubleValue (0.476), ns3::MakeDoubleChecker<double> ());
 static ns3::GlobalValue g_configuration ("configuration",
                                          "RF configuration 0=850MHz, 1=3.5GHz, 2=28GHz",
                                          ns3::UintegerValue (0),
@@ -553,6 +644,8 @@ main (int argc, char *argv[])
   double gnbDistance = doubleValue.Get ();
   GlobalValue::GetValueByName ("asmMode", uintegerValue);
   uint8_t asmMode = uintegerValue.Get ();
+  GlobalValue::GetValueByName ("asmStateMachine", booleanValue);
+  bool asmStateMachine = booleanValue.Get ();
   GlobalValue::GetValueByName ("rlcAmEnabled", booleanValue);
   bool rlcAmEnabled = booleanValue.Get ();
   GlobalValue::GetValueByName ("bufferSize", uintegerValue);
@@ -601,6 +694,13 @@ main (int argc, char *argv[])
   double indicationPeriodicity = doubleValue.Get ();
   GlobalValue::GetValueByName ("useSemaphores", booleanValue);
   bool useSemaphores = booleanValue.Get ();
+  GlobalValue::GetValueByName ("handoverMode", stringValue);
+  std::string handoverMode = stringValue.Get ();
+  if (handoverMode != "NoAuto" && handoverMode != "FixedTtt" && handoverMode != "DynamicTtt" &&
+      handoverMode != "Threshold")
+    {
+      NS_FATAL_ERROR ("handoverMode must be NoAuto, FixedTtt, DynamicTtt, or Threshold");
+    }
 
   if (useSemaphores)
     {
@@ -627,6 +727,36 @@ main (int argc, char *argv[])
   Config::SetDefault ("ns3::McEnbPdcp::perPckToLTE", DoubleValue (0.0));
   Config::SetDefault ("ns3::MmWaveMacScheduler::AsmMode", UintegerValue (asmMode));
   Config::SetDefault ("ns3::MmWaveEnbNetDevice::AsmMode", UintegerValue (asmMode));
+  Config::SetDefault ("ns3::MmWaveEnbNetDevice::AsmStateMachine", BooleanValue (asmStateMachine));
+  auto setAsmTime = [] (const char *globalName, const char *attributeName) {
+      ns3::DoubleValue value;
+      ns3::GlobalValue::GetValueByName (globalName, value);
+      ns3::Config::SetDefault (attributeName, ns3::TimeValue (ns3::Seconds (value.Get ())));
+  };
+  auto setAsmPower = [] (const char *globalName, const char *attributeName) {
+      ns3::DoubleValue value;
+      ns3::GlobalValue::GetValueByName (globalName, value);
+      ns3::Config::SetDefault (attributeName, ns3::DoubleValue (value.Get ()));
+  };
+  setAsmTime ("asmPaOffTime", "ns3::MmWaveEnbNetDevice::AsmPaOffTime");
+  setAsmTime ("asmRfOffTime", "ns3::MmWaveEnbNetDevice::AsmRfOffTime");
+  setAsmTime ("asmBbOffTime", "ns3::MmWaveEnbNetDevice::AsmBbOffTime");
+  setAsmTime ("asmControlToMinimalTime", "ns3::MmWaveEnbNetDevice::AsmControlToMinimalTime");
+  setAsmTime ("asmMinimalOffTime", "ns3::MmWaveEnbNetDevice::AsmMinimalOffTime");
+  setAsmTime ("asmOffToMinimalTime", "ns3::MmWaveEnbNetDevice::AsmOffToMinimalTime");
+  setAsmTime ("asmMinimalToControlTime", "ns3::MmWaveEnbNetDevice::AsmMinimalToControlTime");
+  setAsmTime ("asmBbOnTime", "ns3::MmWaveEnbNetDevice::AsmBbOnTime");
+  setAsmTime ("asmRfOnTime", "ns3::MmWaveEnbNetDevice::AsmRfOnTime");
+  setAsmTime ("asmPaOnTime", "ns3::MmWaveEnbNetDevice::AsmPaOnTime");
+  setAsmPower ("asmRfPower", "ns3::MmWaveEnbNetDevice::AsmRfPower");
+  setAsmPower ("asmBbPower", "ns3::MmWaveEnbNetDevice::AsmBbPower");
+  setAsmPower ("asmControlPower", "ns3::MmWaveEnbNetDevice::AsmControlPower");
+  setAsmPower ("asmMinimalPower", "ns3::MmWaveEnbNetDevice::AsmMinimalPower");
+  setAsmPower ("asmPaWakePower", "ns3::MmWaveEnbNetDevice::AsmPaWakePower");
+  setAsmPower ("asmRfWakePower", "ns3::MmWaveEnbNetDevice::AsmRfWakePower");
+  setAsmPower ("asmBbWakePower", "ns3::MmWaveEnbNetDevice::AsmBbWakePower");
+  setAsmPower ("asmControlWakePower", "ns3::MmWaveEnbNetDevice::AsmControlWakePower");
+  setAsmPower ("asmMinimalWakePower", "ns3::MmWaveEnbNetDevice::AsmMinimalWakePower");
   Config::SetDefault ("ns3::MmWaveEnbNetDevice::ControlFileNameAsm", StringValue (controlFileNameAsm));
   Config::SetDefault ("ns3::MmWaveEnbNetDevice::ScheduleAsmControl", BooleanValue (scheduleAsmControl));
   Config::SetDefault ("ns3::MmWaveEnbNetDevice::FlushAsmControlFile", BooleanValue (flushAsmControlFile));
@@ -654,7 +784,7 @@ main (int argc, char *argv[])
   Config::SetDefault ("ns3::MmWavePhyMacCommon::NumHarqProcess", UintegerValue (100));
   Config::SetDefault ("ns3::MmWaveEnbMac::NumberOfRaPreambles", UintegerValue (40));
   Config::SetDefault ("ns3::LteEnbMac::NumberOfRaPreambles", UintegerValue (40));
-  Config::SetDefault ("ns3::LteEnbRrc::SecondaryCellHandoverMode", StringValue ("NoAuto"));
+  Config::SetDefault ("ns3::LteEnbRrc::SecondaryCellHandoverMode", StringValue (handoverMode));
   Config::SetDefault ("ns3::LteEnbRrc::OutageThreshold", DoubleValue (-5.0));
   Config::SetDefault ("ns3::ThreeGppChannelModel::UpdatePeriod", TimeValue (MilliSeconds (100.0)));
   Config::SetDefault ("ns3::ThreeGppChannelConditionModel::UpdatePeriod",
@@ -718,6 +848,7 @@ main (int argc, char *argv[])
                                         << " freq=" << centerFrequency / 1e9
                                         << " GHz mmWaveBw=" << bandwidth / 1e6
                                         << " MHz lteRbs=" << lteBandwidthRbs
+                                        << " handover=" << handoverMode
                                         << " controlFile=" << controlFileNameAsm
                                         << " scheduleAsm=" << scheduleAsmControl
                                         << " useSemaphores=" << useSemaphores);
@@ -1018,7 +1149,7 @@ main (int argc, char *argv[])
 
   g_tputLog.open ("asm-path-tput.csv");
   g_tputLog << "timeMs,asmModes,ltePdcpBytes,mmwPdcpBytes,lteKbps,mmwKbps,lteFrac,appRxDeltaBytes,"
-               "appKbps"
+               "appKbps,asmState,asmPowerW,dataSym,cellPower"
             << std::endl;
   g_ueSatLog.open ("ue-app-sat.csv");
   g_ueSatLog << "timeMs,imsi,appClass,appRate,rxKbps,offeredKbps,sat,servingNrCellId,useMmWave"

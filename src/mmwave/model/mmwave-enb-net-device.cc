@@ -37,7 +37,10 @@
 #include "mmwave-ue-net-device.h"
 
 #include <ns3/abort.h>
+#include <ns3/boolean.h>
 #include <ns3/callback.h>
+
+#include <cmath>
 #include <ns3/config.h>
 #include <ns3/double.h>
 #include <ns3/enum.h>
@@ -240,12 +243,127 @@ TypeId MmWaveEnbNetDevice::GetTypeId ()
                           MakeUintegerAccessor(&MmWaveEnbNetDevice::m_cellId),
                           MakeUintegerChecker<uint16_t>())
             .AddAttribute("AsmMode",
-                          "ASM data duty: 1=100%, 2=75%, 3=50%, 4=25%, 5=0% of data "
-                          "symbols. 6=TurnOff (HO barred, evict to other mmWave or LTE).",
+                          "duty_mode data symbols: 1=100%, 2=75%, 3=50%, 4=25%, 5=0% of data "
+                          "symbols. 6=TurnOff (HO barred, evict to other mmWave or LTE). "
+                          "When AsmStateMachine is true this is the ASM target: "
+                          "1=Active, 2=ASM1, 3=ASM2, 4=ASM3, 5=ASM4, 6=OFF.",
                           UintegerValue(1),
                           MakeUintegerAccessor(&MmWaveEnbNetDevice::SetAsmMode,
                                                &MmWaveEnbNetDevice::GetAsmMode),
                           MakeUintegerChecker<uint8_t>(1, 6))
+            .AddAttribute("AsmStateMachine",
+                          "If true, AsmMode is a real ASM target and transitions follow "
+                          "component on/off times. If false, AsmMode is duty_mode.",
+                          BooleanValue(false),
+                          MakeBooleanAccessor(&MmWaveEnbNetDevice::m_asmStateMachine),
+                          MakeBooleanChecker())
+            .AddAttribute("AsmPaOffTime",
+                          "Time to turn the PA off. Default is SM1 deactivation "
+                          "(Salem et al., 2019; half of a 71 us OFDM symbol).",
+                          TimeValue(Seconds(35.5e-6)),
+                          MakeTimeAccessor(&MmWaveEnbNetDevice::m_paOff),
+                          MakeTimeChecker())
+            .AddAttribute("AsmRfOffTime",
+                          "Time to turn RF off. Default is the SM2 analog front-end "
+                          "deactivation, 0.5 ms.",
+                          TimeValue(Seconds(0.5e-3)),
+                          MakeTimeAccessor(&MmWaveEnbNetDevice::m_rfOff),
+                          MakeTimeChecker())
+            .AddAttribute("AsmBbOffTime",
+                          "Time to turn the baseband off. Default is the SM3 digital "
+                          "baseband deactivation, 5 ms.",
+                          TimeValue(Seconds(5e-3)),
+                          MakeTimeAccessor(&MmWaveEnbNetDevice::m_bbOff),
+                          MakeTimeChecker())
+            .AddAttribute("AsmControlToMinimalTime",
+                          "Time to reduce Control to Minimal. Default is the SM4 "
+                          "standby deactivation, 0.5 s.",
+                          TimeValue(Seconds(0.5)),
+                          MakeTimeAccessor(&MmWaveEnbNetDevice::m_controlToMinimal),
+                          MakeTimeChecker())
+            .AddAttribute("AsmMinimalOffTime",
+                          "Time for Minimal to disappear into OFF. The four-level ASM "
+                          "model stops at standby; this reuses that 0.5 s class.",
+                          TimeValue(Seconds(0.5)),
+                          MakeTimeAccessor(&MmWaveEnbNetDevice::m_minimalOff),
+                          MakeTimeChecker())
+            .AddAttribute("AsmOffToMinimalTime",
+                          "Time to raise OFF to Minimal. Same 0.5 s class as "
+                          "AsmMinimalOffTime.",
+                          TimeValue(Seconds(0.5)),
+                          MakeTimeAccessor(&MmWaveEnbNetDevice::m_offToMinimal),
+                          MakeTimeChecker())
+            .AddAttribute("AsmMinimalToControlTime",
+                          "Time to raise Minimal to Control. Default is the SM4 "
+                          "activation, 0.5 s.",
+                          TimeValue(Seconds(0.5)),
+                          MakeTimeAccessor(&MmWaveEnbNetDevice::m_minimalToControl),
+                          MakeTimeChecker())
+            .AddAttribute("AsmBbOnTime",
+                          "Time to turn the baseband on. Default is the SM3 "
+                          "activation, 5 ms.",
+                          TimeValue(Seconds(5e-3)),
+                          MakeTimeAccessor(&MmWaveEnbNetDevice::m_bbOn),
+                          MakeTimeChecker())
+            .AddAttribute("AsmRfOnTime",
+                          "Time to turn RF on. Default is the SM2 activation, 0.5 ms.",
+                          TimeValue(Seconds(0.5e-3)),
+                          MakeTimeAccessor(&MmWaveEnbNetDevice::m_rfOn),
+                          MakeTimeChecker())
+            .AddAttribute("AsmPaOnTime",
+                          "Time to turn the PA on. Default is the SM1 activation, "
+                          "35.5 us.",
+                          TimeValue(Seconds(35.5e-6)),
+                          MakeTimeAccessor(&MmWaveEnbNetDevice::m_paOn),
+                          MakeTimeChecker())
+            .AddAttribute("AsmRfPower",
+                          "Operating power of RF in watts. Pico SM1 minus SM2 "
+                          "(Onireti et al., PIMRC 2017).",
+                          DoubleValue(1.142),
+                          MakeDoubleAccessor(&MmWaveEnbNetDevice::m_rfPower),
+                          MakeDoubleChecker<double>(0.0))
+            .AddAttribute("AsmBbPower",
+                          "Operating power of the baseband in watts. Pico SM2 minus SM3.",
+                          DoubleValue(0.067),
+                          MakeDoubleAccessor(&MmWaveEnbNetDevice::m_bbPower),
+                          MakeDoubleChecker<double>(0.0))
+            .AddAttribute("AsmControlPower",
+                          "Operating power of Control in watts. Pico SM3 total, "
+                          "since Control replaces Minimal.",
+                          DoubleValue(0.301),
+                          MakeDoubleAccessor(&MmWaveEnbNetDevice::m_controlPower),
+                          MakeDoubleChecker<double>(0.0))
+            .AddAttribute("AsmMinimalPower",
+                          "Operating power of Minimal in watts. Pico SM4 total.",
+                          DoubleValue(0.238),
+                          MakeDoubleAccessor(&MmWaveEnbNetDevice::m_minimalPower),
+                          MakeDoubleChecker<double>(0.0))
+            .AddAttribute("AsmPaWakePower",
+                          "Power while the PA is turning on, in watts. "
+                          "Twice the 30 dBm TxPower reference.",
+                          DoubleValue(2.0),
+                          MakeDoubleAccessor(&MmWaveEnbNetDevice::m_paWakePower),
+                          MakeDoubleChecker<double>(0.0))
+            .AddAttribute("AsmRfWakePower",
+                          "Power while RF is turning on, in watts. Twice AsmRfPower.",
+                          DoubleValue(2.284),
+                          MakeDoubleAccessor(&MmWaveEnbNetDevice::m_rfWakePower),
+                          MakeDoubleChecker<double>(0.0))
+            .AddAttribute("AsmBbWakePower",
+                          "Power while the baseband is turning on, in watts. Twice AsmBbPower.",
+                          DoubleValue(0.134),
+                          MakeDoubleAccessor(&MmWaveEnbNetDevice::m_bbWakePower),
+                          MakeDoubleChecker<double>(0.0))
+            .AddAttribute("AsmControlWakePower",
+                          "Power while Control is turning on, in watts. Twice AsmControlPower.",
+                          DoubleValue(0.602),
+                          MakeDoubleAccessor(&MmWaveEnbNetDevice::m_controlWakePower),
+                          MakeDoubleChecker<double>(0.0))
+            .AddAttribute("AsmMinimalWakePower",
+                          "Power while Minimal is turning on, in watts. Twice AsmMinimalPower.",
+                          DoubleValue(0.476),
+                          MakeDoubleAccessor(&MmWaveEnbNetDevice::m_minimalWakePower),
+                          MakeDoubleChecker<double>(0.0))
             .AddAttribute("BasicCellId",
                           "Basic cell ID. This is needed to properly loop over neighbors.",
                           UintegerValue(1),
@@ -359,6 +477,13 @@ MmWaveEnbNetDevice::DoInitialize(void)
     m_rrc->Initialize();
     m_componentCarrierManager->Initialize();
     ApplyAsmToSchedulers();
+    if (m_asmStateMachine)
+    {
+        m_asmCurrent = m_asmMode;
+        m_asmTarget = m_asmCurrent;
+        m_asmPhase = 0;
+        AsmInstallSlotHook();
+    }
     if (m_asmMode == 6)
     {
         ApplyAsmTurnOff();
@@ -637,7 +762,10 @@ MmWaveEnbNetDevice::UpdateConfig(void)
                         "L1M.RS-SINR.Bin94.UEID,L1M.RS-SINR.Bin127.UEID,DRB.BufferSize.Qos.UEID,"
                         "DRB.UEThpDl.UEID,DRB.UEThpDlPdcpBased.UEID";
 
-                    csv << header_csv + "," + cell_header + "," + ue_header + "\n";
+                    std::string asm_header = "ASM.Mode,ASM.Phase,ASM.Target,ASM.PowerW";
+
+                    csv << header_csv + "," + cell_header + "," + ue_header + "," + asm_header +
+                               "\n";
                     csv.close();
                     Simulator::Schedule(MicroSeconds(800),
                                         &MmWaveEnbNetDevice::BuildAndSendReportMessage,
@@ -669,12 +797,21 @@ MmWaveEnbNetDevice::SetCcMap(std::map<uint8_t, Ptr<MmWaveComponentCarrier>> ccm)
     NS_ASSERT_MSG(!m_isConfigured, "attempt to set CC map after configuration");
     m_ccMap = ccm;
     ApplyAsmToSchedulers();
+    if (m_asmStateMachine)
+    {
+        AsmInstallSlotHook();
+    }
 }
 
 void
 MmWaveEnbNetDevice::SetAsmMode(uint8_t mode)
 {
     NS_ABORT_MSG_IF(mode < 1 || mode > 6, "ASM mode must be 1..6");
+    if (m_asmStateMachine)
+    {
+        AsmCommandTarget(mode);
+        return;
+    }
     if (mode == m_asmMode)
     {
         return;
@@ -912,7 +1049,389 @@ MmWaveEnbNetDevice::ApplyAsmControlFile()
 uint8_t
 MmWaveEnbNetDevice::GetAsmMode() const
 {
-    return m_asmMode;
+    return m_asmStateMachine ? m_asmCurrent : m_asmMode;
+}
+
+uint8_t
+MmWaveEnbNetDevice::GetAsmPhase() const
+{
+    return m_asmPhase;
+}
+
+uint8_t
+MmWaveEnbNetDevice::GetAsmTarget() const
+{
+    return m_asmStateMachine ? m_asmTarget : GetAsmMode();
+}
+
+double
+MmWaveEnbNetDevice::ConsumeAveragePowerW(double periodSec)
+{
+    AsmTouchEnergy();
+    double average = periodSec > 0.0 ? m_energyJ / periodSec : m_cachedPower;
+    m_energyJ = 0.0;
+    m_lastAveragePowerW = average;
+    return average;
+}
+
+double
+MmWaveEnbNetDevice::GetLastAveragePowerW() const
+{
+    return m_lastAveragePowerW;
+}
+
+bool
+MmWaveEnbNetDevice::LogsKpmToFile() const
+{
+    return m_forceE2FileLogging;
+}
+
+void
+MmWaveEnbNetDevice::AsmCommandTarget(uint8_t mode)
+{
+    if (m_asmPhase != 0)
+    {
+        NS_LOG_INFO("Ignore ASM target " << unsigned(mode) << " on cell " << m_cellId
+                                         << " while phase " << unsigned(m_asmPhase));
+        return;
+    }
+    if (mode == m_asmCurrent)
+    {
+        return;
+    }
+    int fromDepth = static_cast<int>(m_asmCurrent) - 1;
+    int toDepth = static_cast<int>(mode) - 1;
+    m_asmTarget = mode;
+    m_asmPhase = toDepth > fromDepth ? 1 : 2;
+    m_asmTransStart = Simulator::Now();
+    m_asmTransEnd = m_asmTransStart + AsmTransitionDuration(fromDepth, toDepth);
+    NS_LOG_UNCOND(Simulator::Now().GetMilliSeconds()
+                  << " ms mmWave cell " << m_cellId << " ASM target " << unsigned(m_asmCurrent)
+                  << " -> " << unsigned(mode) << " phase " << unsigned(m_asmPhase)
+                  << " delayMs " << m_asmTransEnd.GetMilliSeconds() - m_asmTransStart.GetMilliSeconds());
+    // Data and radiated power follow the new phase from this instant. Deactivating
+    // closes the gate now; Waking stays closed until completion opens it.
+    AsmTouchEnergy();
+    AsmApplyDataGate();
+    AsmScheduleEnergySamples();
+}
+
+void
+MmWaveEnbNetDevice::AsmOnSlotStart()
+{
+    if (!m_asmStateMachine)
+    {
+        return;
+    }
+    Time now = Simulator::Now();
+    if (m_slotSeen && m_lastSlotSeen == now)
+    {
+        return;
+    }
+    m_slotSeen = true;
+    m_lastSlotSeen = now;
+    AsmTouchEnergy();
+    if (m_asmPhase != 0 && now >= m_asmTransEnd)
+    {
+        AsmCompleteTransition();
+        AsmTouchEnergy();
+    }
+    AsmApplyDataGate();
+}
+
+void
+MmWaveEnbNetDevice::AsmInstallSlotHook()
+{
+    if (!m_asmStateMachine)
+    {
+        return;
+    }
+    for (auto& it : m_ccMap)
+    {
+        Ptr<MmWaveComponentCarrierEnb> cc = DynamicCast<MmWaveComponentCarrierEnb>(it.second);
+        if (cc && cc->GetMac())
+        {
+            cc->GetMac()->SetSlotStartCallback(
+                MakeCallback(&MmWaveEnbNetDevice::AsmOnSlotStart, this));
+        }
+    }
+    AsmApplyDataGate();
+}
+
+void
+MmWaveEnbNetDevice::AsmApplyDataGate()
+{
+    // Data only in stable Active. Deactivating closes it at the command.
+    // Waking into Active stays closed until that transition completes.
+    bool allow = m_asmCurrent == 1 && m_asmPhase == 0;
+    for (auto& it : m_ccMap)
+    {
+        Ptr<MmWaveComponentCarrierEnb> cc = DynamicCast<MmWaveComponentCarrierEnb>(it.second);
+        if (cc && cc->GetMacScheduler())
+        {
+            cc->GetMacScheduler()->SetAsmDataGate(true, allow);
+        }
+    }
+}
+
+void
+MmWaveEnbNetDevice::AsmCompleteTransition()
+{
+    uint8_t oldMode = m_asmCurrent;
+    uint8_t newMode = m_asmTarget;
+    m_asmCurrent = newMode;
+    m_asmMode = newMode;
+    m_asmPhase = 0;
+    if (newMode == 6 && oldMode != 6)
+    {
+        ApplyAsmTurnOff();
+    }
+    else if (oldMode == 6 && newMode != 6)
+    {
+        ApplyAsmTurnOn();
+    }
+    AsmApplyDataGate();
+    LogAsmModeChange(oldMode, newMode);
+}
+
+void
+MmWaveEnbNetDevice::AsmTouchEnergy()
+{
+    if (!m_asmStateMachine)
+    {
+        return;
+    }
+    Time now = Simulator::Now();
+    if (!m_energyInit)
+    {
+        m_energyTime = now;
+        m_cachedPower = AsmPowerW();
+        m_energyInit = true;
+        return;
+    }
+    if (now < m_energyTime)
+    {
+        return;
+    }
+    m_energyJ += m_cachedPower * (now - m_energyTime).GetSeconds();
+    m_energyTime = now;
+    m_cachedPower = AsmPowerW();
+}
+
+void
+MmWaveEnbNetDevice::AsmScheduleEnergySamples()
+{
+    Time cursor = m_asmTransStart;
+    int fromDepth = static_cast<int>(m_asmCurrent) - 1;
+    int toDepth = static_cast<int>(m_asmTarget) - 1;
+    auto scheduleAt = [this](Time when) {
+        Time now = Simulator::Now();
+        if (when > now)
+        {
+            Simulator::Schedule(when - now, &MmWaveEnbNetDevice::AsmTouchEnergy, this);
+        }
+    };
+    if (toDepth > fromDepth)
+    {
+        for (int boundary = fromDepth; boundary < toDepth; ++boundary)
+        {
+            cursor += AsmOffDuration(boundary);
+            scheduleAt(cursor);
+        }
+    }
+    else
+    {
+        for (int boundary = fromDepth - 1; boundary >= toDepth; --boundary)
+        {
+            cursor += AsmOnDuration(boundary);
+            scheduleAt(cursor);
+        }
+    }
+}
+
+Time
+MmWaveEnbNetDevice::AsmOffDuration(int boundary) const
+{
+    switch (boundary)
+    {
+    case 0:
+        return m_paOff;
+    case 1:
+        return m_rfOff;
+    case 2:
+        return m_bbOff;
+    case 3:
+        return m_controlToMinimal;
+    case 4:
+        return m_minimalOff;
+    default:
+        return Seconds(0);
+    }
+}
+
+Time
+MmWaveEnbNetDevice::AsmOnDuration(int boundary) const
+{
+    switch (boundary)
+    {
+    case 0:
+        return m_paOn;
+    case 1:
+        return m_rfOn;
+    case 2:
+        return m_bbOn;
+    case 3:
+        return m_minimalToControl;
+    case 4:
+        return m_offToMinimal;
+    default:
+        return Seconds(0);
+    }
+}
+
+Time
+MmWaveEnbNetDevice::AsmTransitionDuration(int fromDepth, int toDepth) const
+{
+    Time total = Seconds(0);
+    if (toDepth > fromDepth)
+    {
+        for (int boundary = fromDepth; boundary < toDepth; ++boundary)
+        {
+            total += AsmOffDuration(boundary);
+        }
+    }
+    else
+    {
+        for (int boundary = fromDepth - 1; boundary >= toDepth; --boundary)
+        {
+            total += AsmOnDuration(boundary);
+        }
+    }
+    return total;
+}
+
+double
+MmWaveEnbNetDevice::AsmTxPowerW() const
+{
+    if (m_ccMap.empty())
+    {
+        return 1.0;
+    }
+    Ptr<MmWaveEnbPhy> phy = GetPhy();
+    if (!phy)
+    {
+        return 1.0;
+    }
+    return std::pow(10.0, (phy->GetTxPower() - 30.0) / 10.0);
+}
+
+double
+MmWaveEnbNetDevice::AsmStablePowerW(uint8_t mode) const
+{
+    switch (mode)
+    {
+    case 1:
+        return AsmTxPowerW() + m_rfPower + m_bbPower + m_controlPower;
+    case 2:
+        return m_rfPower + m_bbPower + m_controlPower;
+    case 3:
+        return m_bbPower + m_controlPower;
+    case 4:
+        return m_controlPower;
+    case 5:
+        return m_minimalPower;
+    default:
+        return 0.0;
+    }
+}
+
+double
+MmWaveEnbNetDevice::AsmOffIntervalPowerW(int fromDepth, int boundary) const
+{
+    double power = 0.0;
+    // The PA is the component turning off on boundary 0, so radiated power is
+    // already gone. fromDepth selects the same off sequence.
+    (void)fromDepth;
+    if (boundary < 1)
+    {
+        power += m_rfPower;
+    }
+    if (boundary < 2)
+    {
+        power += m_bbPower;
+    }
+    if (boundary < 3)
+    {
+        power += m_controlPower;
+    }
+    return power;
+}
+
+double
+MmWaveEnbNetDevice::AsmOnIntervalPowerW(int boundary) const
+{
+    switch (boundary)
+    {
+    case 0:
+        return m_paWakePower + m_rfPower + m_bbPower + m_controlPower;
+    case 1:
+        return m_rfWakePower + m_bbPower + m_controlPower;
+    case 2:
+        return m_bbWakePower + m_controlPower;
+    case 3:
+        return m_controlWakePower;
+    case 4:
+        return m_minimalWakePower;
+    default:
+        return 0.0;
+    }
+}
+
+double
+MmWaveEnbNetDevice::AsmPowerW() const
+{
+    if (!m_asmStateMachine || m_asmPhase == 0)
+    {
+        return AsmStablePowerW(m_asmStateMachine ? m_asmCurrent : 1);
+    }
+    Time now = Simulator::Now();
+    int fromDepth = static_cast<int>(m_asmCurrent) - 1;
+    int toDepth = static_cast<int>(m_asmTarget) - 1;
+    if (now >= m_asmTransEnd)
+    {
+        return AsmStablePowerW(m_asmTarget);
+    }
+    Time elapsed = now - m_asmTransStart;
+    if (elapsed.IsNegative())
+    {
+        elapsed = Seconds(0);
+    }
+    Time cursor = Seconds(0);
+    if (toDepth > fromDepth)
+    {
+        for (int boundary = fromDepth; boundary < toDepth; ++boundary)
+        {
+            Time len = AsmOffDuration(boundary);
+            if (elapsed < cursor + len)
+            {
+                return AsmOffIntervalPowerW(fromDepth, boundary);
+            }
+            cursor += len;
+        }
+    }
+    else
+    {
+        for (int boundary = fromDepth - 1; boundary >= toDepth; --boundary)
+        {
+            Time len = AsmOnDuration(boundary);
+            if (elapsed < cursor + len)
+            {
+                return AsmOnIntervalPowerW(boundary);
+            }
+            cursor += len;
+        }
+    }
+    return AsmStablePowerW(m_asmTarget);
 }
 
 void
@@ -1762,6 +2281,11 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageDu(std::string plmId, uint16_t nrCe
         }
 
         uint64_t timestamp = m_startTime + Simulator::Now().GetMilliSeconds();
+        double asmPowerW = ConsumeAveragePowerW(m_e2Periodicity);
+        std::string asmKpm = std::to_string(static_cast<unsigned>(GetAsmMode())) + "," +
+                             std::to_string(static_cast<unsigned>(GetAsmPhase())) + "," +
+                             std::to_string(static_cast<unsigned>(GetAsmTarget())) + "," +
+                             std::to_string(asmPowerW);
 
         // the string is timestamp, ueImsiComplete, plmId, nrCellId, dlAvailablePrbs,
         // ulAvailablePrbs, qci , dlPrbUsage, ulPrbUsage, /*CellSpecificValues*/, /*
@@ -1821,9 +2345,17 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageDu(std::string plmId, uint16_t nrCe
             auto uePms = uePmStringDu.find(imsi)->second;
 
             std::string to_print = std::to_string(timestamp) + "," + ueImsiComplete + "," +
-                                   to_print_cell + "," + uePms + "\n";
+                                   to_print_cell + "," + uePms + "," + asmKpm + "\n";
 
             csv << to_print;
+        }
+        if (ueMap.empty())
+        {
+            // OFF evicts every UE. Still emit one cell row so ASM state and power stay in the KPM.
+            std::string ueZeros =
+                "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0";
+            csv << std::to_string(timestamp) << ",0," << to_print_cell << "," << ueZeros << ","
+                << asmKpm << "\n";
         }
         csv.close();
 

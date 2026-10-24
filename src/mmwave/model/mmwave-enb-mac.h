@@ -144,6 +144,9 @@ class MmWaveEnbMac : public Object
 
     void SetForwardUpCallback(Callback<void, Ptr<Packet>> cb);
 
+    /** Called at each slot start, before the scheduler assigns the slot two ahead. */
+    void SetSlotStartCallback(Callback<void> cb);
+
     //  void PhyPacketRx (Ptr<Packet> p);
 
     void DoReceivePhyPdu(Ptr<Packet> p);
@@ -246,6 +249,7 @@ class MmWaveEnbMac : public Object
     std::list<uint16_t> m_associatedUe;
 
     Callback<void, Ptr<Packet>> m_forwardUpCallback;
+    Callback<void> m_slotStartCallback;
 
     std::vector<DlCqiInfo> m_dlCqiReceived;
     std::vector<MmWaveMacSchedSapProvider::SchedUlCqiInfoReqParameters> m_ulCqiReceived;

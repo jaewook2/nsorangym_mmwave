@@ -66,7 +66,7 @@ MmWaveMacScheduler::GetTypeId(void)
         TypeId("ns3::MmWaveMacScheduler")
             .SetParent<Object>()
             .AddAttribute("AsmMode",
-                          "ASM data duty: 1=100%, 2=75%, 3=50%, 4=25%, 5=0% of data "
+                          "duty_mode data symbols: 1=100%, 2=75%, 3=50%, 4=25%, 5=0% of data "
                           "symbols. 6=TurnOff (HO barred, evict to other mmWave or LTE).",
                           UintegerValue(1),
                           MakeUintegerAccessor(&MmWaveMacScheduler::SetAsmMode,
@@ -87,6 +87,13 @@ uint8_t
 MmWaveMacScheduler::GetAsmMode() const
 {
     return m_asmMode;
+}
+
+void
+MmWaveMacScheduler::SetAsmDataGate(bool enabled, bool allowData)
+{
+    m_asmDataGate = enabled;
+    m_asmDataAllowed = allowData;
 }
 
 double
@@ -110,6 +117,10 @@ MmWaveMacScheduler::GetAvailableDataSymbols() const
     if (full < 0)
     {
         full = 0;
+    }
+    if (m_asmDataGate)
+    {
+        return m_asmDataAllowed ? full : 0;
     }
     return static_cast<int>(std::floor(full * AsmDutyCycle(m_asmMode) + 1e-9));
 }

@@ -550,6 +550,10 @@ MmWaveEnbMac::DoSlotIndication(SfnSf sfnSf)
 
     if (slotStart)
     {
+        if (!m_slotStartCallback.IsNull())
+        {
+            m_slotStartCallback();
+        }
         NS_LOG_LOGIC("Starting a new NR slot - DoSlotIndication");
         NS_LOG_DEBUG("Current frame " << sfnSf.m_frameNum << " subframe " << (unsigned)sfnSf.m_sfNum
                                       << " slot " << (unsigned)sfnSf.m_slotNum);
@@ -622,6 +626,12 @@ void
 MmWaveEnbMac::SetForwardUpCallback(Callback<void, Ptr<Packet>> cb)
 {
     m_forwardUpCallback = cb;
+}
+
+void
+MmWaveEnbMac::SetSlotStartCallback(Callback<void> cb)
+{
+    m_slotStartCallback = cb;
 }
 
 void

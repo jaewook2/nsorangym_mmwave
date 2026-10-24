@@ -81,6 +81,11 @@ class MmWaveMacScheduler : public Object
      */
     void SetAsmMode(uint8_t mode);
     uint8_t GetAsmMode() const;
+    /**
+     * When enabled, data symbols are all or nothing from the ASM state machine.
+     * duty_mode keeps the symbol-fraction table.
+     */
+    void SetAsmDataGate(bool enabled, bool allowData);
     int GetAvailableDataSymbols() const;
     static double AsmDutyCycle(uint8_t mode);
 
@@ -88,6 +93,8 @@ class MmWaveMacScheduler : public Object
     Ptr<MmWavePhyMacCommon> m_phyMacConfig;
     uint32_t m_rbgSize; // RBs per RB group for res alloc type 0
     uint8_t m_asmMode;
+    bool m_asmDataGate = false;
+    bool m_asmDataAllowed = true;
 };
 
 } // namespace mmwave
