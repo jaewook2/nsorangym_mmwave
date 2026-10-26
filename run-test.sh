@@ -14,7 +14,7 @@ e2TermIp="10.244.0.240" # actual E2term IP interface
 basicCellId=1 # The next value will be the first cellId
 ues=15 # Number of UEs for each mmWave ENB
 reducedPmValues=0 # use reduced subset of pmValues
-EnableE2FileLogging=1 # enable offline generation of data
+EnableGYMFileLogging=1 # enable offline generation of data
 controlPath="es_actions_for_ns3.csv" # full control file path
 
 # Remove NoAuto on handover and Outage Threshold to use the Dynamic TTI HO
@@ -43,7 +43,7 @@ handoverMode="DynamicTtt"
                                     --ues=$ues \
                                     --reducedPmValues=$reducedPmValues \
                                     --e2TermIp=$e2TermIp \
-                                    --enableE2FileLogging=$EnableE2FileLogging \
+                                    --enableGYMFileLogging=$EnableGYMFileLogging \
                                     --minSpeed=$minSpeed\
                                     --maxSpeed=$maxSpeed\
                                     --probOn=0.8 \

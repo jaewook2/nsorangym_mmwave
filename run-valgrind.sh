@@ -32,7 +32,7 @@ bsOff=3
 # Useful parameters to be configured
 basicCellId=1 # The next value will be the first cellId
 reducedPmValues=0 # use reduced subset of pmValues
-EnableE2FileLogging=1 # enable offline generation of data
+EnableGYMFileLogging=1 # enable offline generation of data
 ues=2 # Number of UEs for each mmWave ENB
 dataRate=0
 hoSinrDifference=3
@@ -86,7 +86,7 @@ controlFileName="es_actions_for_ns3.csv" # ES control file path
                                     --ues=$ues \
                                     --reducedPmValues=$reducedPmValues \
                                     --e2TermIp=$e2TermIp \
-                                    --enableE2FileLogging=$EnableE2FileLogging \
+                                    --enableGYMFileLogging=$EnableGYMFileLogging \
                                     --minSpeed=$minSpeed\
                                     --maxSpeed=$maxSpeed\
                                     --indicationPeriodicity=$indicationPeriodicity\

@@ -203,8 +203,8 @@ static ns3::GlobalValue g_e2TermIp ("e2TermIp", "The IP address of the RIC E2 te
                                     ns3::StringValue ("10.244.0.240"), ns3::MakeStringChecker ());
 
 static ns3::GlobalValue
-    g_enableE2FileLogging ("enableE2FileLogging",
-              "If true, generate offline file logging instead of connecting to RIC",
+    g_enableGYMFileLogging ("enableGYMFileLogging",
+              "If true, write cu-up/cu-cp/du csv files for gym and local monitoring",
               ns3::BooleanValue (true), ns3::MakeBooleanChecker ());
 
 static ns3::GlobalValue g_controlFileName ("controlFileName", "The path to the control file (can be absolute)",
@@ -348,8 +348,8 @@ main (int argc, char *argv[])
   std::string handoverMode = stringValue.Get ();
   GlobalValue::GetValueByName ("e2TermIp", stringValue);
   std::string e2TermIp = stringValue.Get ();
-  GlobalValue::GetValueByName ("enableE2FileLogging", booleanValue);
-  bool enableE2FileLogging = booleanValue.Get ();
+  GlobalValue::GetValueByName ("enableGYMFileLogging", booleanValue);
+  bool enableGYMFileLogging = booleanValue.Get ();
   GlobalValue::GetValueByName ("minSpeed", doubleValue);
   double minSpeed = doubleValue.Get ();
   GlobalValue::GetValueByName ("maxSpeed", doubleValue);
@@ -381,7 +381,7 @@ main (int argc, char *argv[])
   NS_LOG_UNCOND ("rlcAmEnabled " << rlcAmEnabled << " bufferSize " << unsigned(bufferSize)
                                  << " OutageThreshold " << outageThreshold << " HandoverMode " << handoverMode
                                  << " BasicCellId " << unsigned(basicCellId) << " e2TermIp " << e2TermIp
-                                 << " enableE2FileLogging " << enableE2FileLogging << " minSpeed "
+                                 << " enableGYMFileLogging " << enableGYMFileLogging << " minSpeed "
                                  << minSpeed << " maxSpeed " << maxSpeed << " numberofRaPreambles " << unsigned(numberOfRaPreambles));
 
   GlobalValue::GetValueByName ("e2lteEnabled", booleanValue);
@@ -449,8 +449,8 @@ main (int argc, char *argv[])
   Config::SetDefault ("ns3::MmWaveEnbNetDevice::ReducedPmValues", BooleanValue (reducedPmValues));
   Config::SetDefault ("ns3::LteEnbNetDevice::ReducedPmValues", BooleanValue (reducedPmValues));
 
-  Config::SetDefault ("ns3::LteEnbNetDevice::EnableE2FileLogging", BooleanValue (enableE2FileLogging));
-  Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableE2FileLogging", BooleanValue (enableE2FileLogging));
+  Config::SetDefault ("ns3::LteEnbNetDevice::EnableGYMFileLogging", BooleanValue (enableGYMFileLogging));
+  Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableGYMFileLogging", BooleanValue (enableGYMFileLogging));
 
   Config::SetDefault ("ns3::LteEnbNetDevice::ScheduleControlMessages", BooleanValue (scheduleControlMessages));
 

@@ -775,8 +775,8 @@ main (int argc, char *argv[])
   Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableCuUpReport", BooleanValue (true));
   Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableCuCpReport", BooleanValue (true));
   Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableDuReport", BooleanValue (true));
-  Config::SetDefault ("ns3::LteEnbNetDevice::EnableE2FileLogging", BooleanValue (useSemaphores));
-  Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableE2FileLogging", BooleanValue (useSemaphores));
+  Config::SetDefault ("ns3::LteEnbNetDevice::EnableGYMFileLogging", BooleanValue (useSemaphores));
+  Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableGYMFileLogging", BooleanValue (useSemaphores));
   Config::SetDefault ("ns3::MmWaveHelper::RlcAmEnabled", BooleanValue (rlcAmEnabled));
   Config::SetDefault ("ns3::MmWaveHelper::HarqEnabled", BooleanValue (true));
   Config::SetDefault ("ns3::MmWaveHelper::UseIdealRrc", BooleanValue (true));

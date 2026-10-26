@@ -281,12 +281,12 @@ MmWaveHelper::GetTypeId(void)
                           MakeUintegerAccessor(&MmWaveHelper::m_noOfLteCcs),
                           MakeUintegerChecker<uint16_t>(MIN_NO_CC, MAX_NO_CC))
             .AddAttribute("E2ModeNr",
-                          "If true, enable reporting over E2 for NR cells.",
+                          "If true, connect NR gNBs to the RIC and send UE and cell KPM reports.",
                           BooleanValue(true),
                           MakeBooleanAccessor(&MmWaveHelper::m_e2mode_nr),
                           MakeBooleanChecker())
             .AddAttribute("E2ModeLte",
-                          "If true, enable reporting over E2 for LTE cells.",
+                          "If true, connect LTE eNBs to the RIC and send UE and cell KPM reports.",
                           BooleanValue(true),
                           MakeBooleanAccessor(&MmWaveHelper::m_e2mode_lte),
                           MakeBooleanChecker())

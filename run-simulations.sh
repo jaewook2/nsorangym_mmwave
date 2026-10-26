@@ -19,7 +19,7 @@ ueZeroPercentage=-1 # PDCP split for UE RNTI 0 on eNB
 N=1 # number of simulations
 basicCellId=1 # The next value will be the first cellId
 reducedPmValues=0 # use reduced subset of pmValues
-EnableE2FileLogging=1 # enable offline generation of data
+EnableGYMFileLogging=1 # enable offline generation of data
 ues=3 # Number of UEs for each mmWave ENB
 
 # Select 0 or 1 to switch between the optimized or debug build
@@ -89,7 +89,7 @@ for i in $(seq 1 $N); do
                                     --ues=$ues \
                                     --reducedPmValues=$reducedPmValues \
                                     --e2TermIp=$e2TermIp \
-                                    --enableE2FileLogging=$EnableE2FileLogging \
+                                    --enableGYMFileLogging=$EnableGYMFileLogging \
                                     --minSpeed=$minSpeed\
                                     --maxSpeed=$maxSpeed\
                                     --numberOfRaPreambles=$numberOfRaPreambles\

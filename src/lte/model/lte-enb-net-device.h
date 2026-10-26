@@ -36,6 +36,7 @@
 #include "ns3/traced-callback.h"
 #include <ns3/oran-interface.h>
 
+#include <atomic>
 #include <map>
 #include <set>
 #include <vector>
@@ -240,6 +241,8 @@ class LteEnbNetDevice : public LteNetDevice
     void BuildAndSendReportMessage(E2Termination::RicSubscriptionRequest_rval_s params);
 
     void KpmSubscriptionCallback(E2AP_PDU_t* sub_req_pdu);
+
+    bool IsE2Subscribed() const;
     void ControlMessageReceivedCallback(E2AP_PDU_t* sub_req_pdu);
     /**
      * @brief Set the PDCP traffic split for the given ueId
@@ -365,7 +368,11 @@ class LteEnbNetDevice : public LteNetDevice
     bool m_isReportingEnabled; //! true is KPM reporting cycle is active, false otherwise
 
     bool m_reducedPmValues;    //< if true use a reduced subset of pmvalues
-    bool m_forceE2FileLogging; //< if true log PMs to files
+    bool m_enableGymFileLogging; //< if true, write the enabled reports to csv files
+    std::atomic<bool> m_e2Subscribed{false};
+    E2Termination::RicSubscriptionRequest_rval_s m_e2ReportParams{};
+    Ptr<KpmIndicationMessage> m_e2UeIndication;
+    Ptr<KpmIndicationMessage> m_e2CellIndication;
 
     bool m_useSemaphores; //< if true set up the semaphores for the external control
     std::string m_metricsReadySemaphoreName; //< name of the semaphore ensuring the consumption of the metrics when they are ready

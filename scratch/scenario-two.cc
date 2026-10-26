@@ -352,8 +352,8 @@ main (int argc, char *argv[])
   Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableCuCpReport", BooleanValue(true));
   Config::SetDefault ("ns3::LteEnbNetDevice::EnableCuCpReport", BooleanValue(true));
 
-  Config::SetDefault ("ns3::LteEnbNetDevice::EnableE2FileLogging", BooleanValue (true));
-  Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableE2FileLogging", BooleanValue (true));
+  Config::SetDefault ("ns3::LteEnbNetDevice::EnableGYMFileLogging", BooleanValue (true));
+  Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableGYMFileLogging", BooleanValue (true));
 
   Config::SetDefault ("ns3::MmWaveEnbMac::NumberOfRaPreambles", UintegerValue (40));
   Config::SetDefault ("ns3::LteEnbMac::NumberOfRaPreambles", UintegerValue (40));

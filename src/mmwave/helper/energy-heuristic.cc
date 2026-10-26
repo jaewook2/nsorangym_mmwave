@@ -23,6 +23,7 @@
 #include "ns3/applications-module.h"
 #include "ns3/lte-ue-net-device.h"
 #include "ns3/mmwave-helper.h"
+#include "ns3/asn1c-types.h"
 #include "energy-heuristic.h"
 #include <vector>
 #include <iostream>

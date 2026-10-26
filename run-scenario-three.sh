@@ -35,7 +35,7 @@ bsOff=2
 seed=500 # seed parameter to be used
 basicCellId=1 # The next value will be the first cellId
 reducedPmValues=0 # use reduced subset of pmValues
-EnableE2FileLogging=1 # enable offline generation of data
+EnableGYMFileLogging=1 # enable offline generation of data
 ues=7 # Number of UEs for each mmWave ENB
 dataRate=0
 
@@ -92,7 +92,7 @@ echo "Running simulation with seed $seed";
                                     --ues=$ues \
                                     --reducedPmValues=$reducedPmValues \
                                     --e2TermIp=$e2TermIp \
-                                    --enableE2FileLogging=$EnableE2FileLogging \
+                                    --enableGYMFileLogging=$EnableGYMFileLogging \
                                     --minSpeed=$minSpeed\
                                     --maxSpeed=$maxSpeed\
                                     --indicationPeriodicity=$indicationPeriodicity\

@@ -191,8 +191,8 @@ static ns3::GlobalValue g_e2TermIp ("e2TermIp", "The IP address of the RIC E2 te
                                     ns3::StringValue ("10.0.2.10"), ns3::MakeStringChecker ());
 
 static ns3::GlobalValue
-    g_enableE2FileLogging ("enableE2FileLogging",
-                           "If true, generate offline file logging instead of connecting to RIC",
+    g_enableGYMFileLogging ("enableGYMFileLogging",
+                           "If true, write cu-up/cu-cp/du csv files for gym and local monitoring",
                            ns3::BooleanValue (false), ns3::MakeBooleanChecker ());
 
 static ns3::GlobalValue g_controlFileName ("controlFileName",
@@ -242,14 +242,14 @@ main (int argc, char *argv[])
   std::string handoverMode = stringValue.Get ();
   GlobalValue::GetValueByName ("e2TermIp", stringValue);
   std::string e2TermIp = stringValue.Get ();
-  GlobalValue::GetValueByName ("enableE2FileLogging", booleanValue);
-  bool enableE2FileLogging = booleanValue.Get ();
+  GlobalValue::GetValueByName ("enableGYMFileLogging", booleanValue);
+  bool enableGYMFileLogging = booleanValue.Get ();
   GlobalValue::GetValueByName ("numberOfRaPreambles", uintegerValue);
   uint8_t numberOfRaPreambles = uintegerValue.Get ();
 
   NS_LOG_UNCOND ("bufferSize " << bufferSize << " OutageThreshold " << outageThreshold
                                << " HandoverMode " << handoverMode << " e2TermIp " << e2TermIp
-                               << " enableE2FileLogging " << enableE2FileLogging);
+                               << " enableGYMFileLogging " << enableGYMFileLogging);
 
   GlobalValue::GetValueByName ("e2lteEnabled", booleanValue);
   bool e2lteEnabled = booleanValue.Get ();
@@ -311,10 +311,10 @@ main (int argc, char *argv[])
   Config::SetDefault ("ns3::MmWaveEnbNetDevice::ReducedPmValues", BooleanValue (reducedPmValues));
   Config::SetDefault ("ns3::LteEnbNetDevice::ReducedPmValues", BooleanValue (reducedPmValues));
 
-  Config::SetDefault ("ns3::LteEnbNetDevice::EnableE2FileLogging",
-                      BooleanValue (enableE2FileLogging));
-  Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableE2FileLogging",
-                      BooleanValue (enableE2FileLogging));
+  Config::SetDefault ("ns3::LteEnbNetDevice::EnableGYMFileLogging",
+                      BooleanValue (enableGYMFileLogging));
+  Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableGYMFileLogging",
+                      BooleanValue (enableGYMFileLogging));
 
   Config::SetDefault ("ns3::MmWaveEnbMac::NumberOfRaPreambles",
                       UintegerValue (numberOfRaPreambles));

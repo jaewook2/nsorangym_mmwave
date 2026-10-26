@@ -94,17 +94,28 @@ MmWaveEnbNetDevice::KpmSubscriptionCallback(E2AP_PDU_t* sub_req_pdu)
 {
     NS_LOG_DEBUG("\nReceived RIC Subscription Request, cellId= " << m_cellId << "\n");
 
-    E2Termination::RicSubscriptionRequest_rval_s params =
-        m_e2term->ProcessRicSubscriptionRequest(sub_req_pdu);
-    NS_LOG_DEBUG("requestorId " << +params.requestorId << ", instanceId " << +params.instanceId
-                                << ", ranFuncionId " << +params.ranFuncionId << ", actionId "
-                                << +params.actionId);
+    m_e2ReportParams = m_e2term->ProcessRicSubscriptionRequest(sub_req_pdu);
+    m_e2Subscribed = true;
+    NS_LOG_DEBUG("requestorId " << +m_e2ReportParams.requestorId << ", instanceId "
+                                << +m_e2ReportParams.instanceId << ", ranFuncionId "
+                                << +m_e2ReportParams.ranFuncionId << ", actionId "
+                                << +m_e2ReportParams.actionId);
 
     if (!m_isReportingEnabled)
     {
-        BuildAndSendReportMessage(params);
         m_isReportingEnabled = true;
+        Simulator::ScheduleWithContext(GetNode()->GetId(),
+                                       Seconds(0),
+                                       &MmWaveEnbNetDevice::BuildAndSendReportMessage,
+                                       this,
+                                       m_e2ReportParams);
     }
+}
+
+bool
+MmWaveEnbNetDevice::IsE2Subscribed() const
+{
+    return m_e2Subscribed.load();
 }
 
 void
@@ -390,17 +401,20 @@ TypeId MmWaveEnbNetDevice::GetTypeId ()
                           MakePointerAccessor(&MmWaveEnbNetDevice::m_e2DuCalculator),
                           MakePointerChecker<MmWavePhyTrace>())
             .AddAttribute("EnableCuUpReport",
-                          "If true, send CuUpReport",
+                          "If true, include the CU-UP report. "
+                          "Appended to cu-up-cell-<id>.txt when EnableGYMFileLogging is true.",
                           BooleanValue(false),
                           MakeBooleanAccessor(&MmWaveEnbNetDevice::m_sendCuUp),
                           MakeBooleanChecker())
             .AddAttribute("EnableCuCpReport",
-                          "If true, send CuCpReport",
+                          "If true, include the CU-CP report. "
+                          "Appended to cu-cp-cell-<id>.txt when EnableGYMFileLogging is true.",
                           BooleanValue(false),
                           MakeBooleanAccessor(&MmWaveEnbNetDevice::m_sendCuCp),
                           MakeBooleanChecker())
             .AddAttribute("EnableDuReport",
-                          "If true, send DuReport",
+                          "If true, include the DU report. "
+                          "Appended to du-cell-<id>.txt when EnableGYMFileLogging is true.",
                           BooleanValue(true),
                           MakeBooleanAccessor(&MmWaveEnbNetDevice::m_sendDu),
                           MakeBooleanChecker())
@@ -409,10 +423,10 @@ TypeId MmWaveEnbNetDevice::GetTypeId ()
                           BooleanValue(false),
                           MakeBooleanAccessor(&MmWaveEnbNetDevice::m_reducedPmValues),
                           MakeBooleanChecker())
-            .AddAttribute("EnableE2FileLogging",
-                          "If true, force E2 indication generation and write E2 fields in csv file",
+            .AddAttribute("EnableGYMFileLogging",
+                          "If true, write the enabled CU-UP, CU-CP, and DU reports to csv files.",
                           BooleanValue(false),
-                          MakeBooleanAccessor(&MmWaveEnbNetDevice::m_forceE2FileLogging),
+                          MakeBooleanAccessor(&MmWaveEnbNetDevice::m_enableGymFileLogging),
                           MakeBooleanChecker())
             .AddAttribute(
                 "ControlFileNameAsm",
@@ -451,7 +465,8 @@ MmWaveEnbNetDevice::MmWaveEnbNetDevice()
       m_isConfigured(false),
       m_isReportingEnabled(false),
       m_reducedPmValues(false),
-      m_forceE2FileLogging(false),
+      m_enableGymFileLogging(false),
+      m_e2Subscribed(false),
       m_cuUpFileName(),
       m_cuCpFileName(),
       m_duFileName()
@@ -678,14 +693,11 @@ MmWaveEnbNetDevice::UpdateConfig(void)
             // schedule at start time
             if (m_e2term)
             {
-                NS_LOG_DEBUG("E2sim start in cell " << m_cellId << " force CSV logging "
-                                                    << m_forceE2FileLogging);
+                NS_LOG_DEBUG("E2sim start in cell " << m_cellId << " gym file logging "
+                                                    << m_enableGymFileLogging);
 
-                if (!m_forceE2FileLogging)
-                {
-                    Simulator::Schedule(MicroSeconds(0), &E2Termination::Start, m_e2term);
-                }
-                else
+                Simulator::Schedule(MicroSeconds(0), &E2Termination::Start, m_e2term);
+                if (m_enableGymFileLogging)
                 {
                     m_cuUpFileName = "cu-up-cell-" + std::to_string(m_cellId) + ".txt";
                     std::ofstream csv{};
@@ -771,6 +783,7 @@ MmWaveEnbNetDevice::UpdateConfig(void)
                                         &MmWaveEnbNetDevice::BuildAndSendReportMessage,
                                         this,
                                         E2Termination::RicSubscriptionRequest_rval_s{});
+                    m_isReportingEnabled = true;
                 }
 
                 // Regardless the offline or online mode for reporting the files, we always want to
@@ -1083,7 +1096,7 @@ MmWaveEnbNetDevice::GetLastAveragePowerW() const
 bool
 MmWaveEnbNetDevice::LogsKpmToFile() const
 {
-    return m_forceE2FileLogging;
+    return m_enableGymFileLogging;
 }
 
 void
@@ -1471,14 +1484,29 @@ MmWaveEnbNetDevice::SetE2Termination(Ptr<E2Termination> e2term)
 
     NS_LOG_DEBUG("Register E2SM");
 
-    if (!m_forceE2FileLogging)
+    if (m_e2term)
     {
-        Ptr<KpmFunctionDescription> kpmFd = Create<KpmFunctionDescription>();
+        Ptr<KpmFunctionDescription> kpmFd = Create<KpmFunctionDescription>(1);
         e2term->RegisterKpmCallbackToE2Sm(
-            200,
+            2,
             kpmFd,
             std::bind(&MmWaveEnbNetDevice::KpmSubscriptionCallback, this, std::placeholders::_1));
+
+        Ptr<RicControlFunctionDescription> ricCtrlFd = Create<RicControlFunctionDescription>();
+        e2term->RegisterSmCallbackToE2Sm(
+            3,
+            ricCtrlFd,
+            std::bind(&MmWaveEnbNetDevice::ControlMessageReceivedCallback,
+                      this,
+                      std::placeholders::_1));
     }
+}
+
+void
+MmWaveEnbNetDevice::ControlMessageReceivedCallback(E2AP_PDU_t* sub_req_pdu)
+{
+    NS_LOG_DEBUG("MmWaveEnbNetDevice::ControlMessageReceivedCallback");
+    NS_LOG_DEBUG("PDU present " << (sub_req_pdu ? sub_req_pdu->present : -1));
 }
 
 std::string
@@ -1506,7 +1534,7 @@ MmWaveEnbNetDevice::BuildRicIndicationHeader(std::string plmId,
                                              std::string gnbId,
                                              uint16_t nrCellId)
 {
-    if (!m_forceE2FileLogging)
+    if (m_e2term)
     {
         KpmIndicationHeader::KpmRicIndicationHeaderValues headerValues;
         headerValues.m_plmId = plmId;
@@ -1531,11 +1559,7 @@ MmWaveEnbNetDevice::BuildRicIndicationHeader(std::string plmId,
 Ptr<KpmIndicationMessage>
 MmWaveEnbNetDevice::BuildRicIndicationMessageCuUp(std::string plmId)
 {
-    Ptr<MmWaveIndicationMessageHelper> indicationMessageHelper =
-        Create<MmWaveIndicationMessageHelper>(IndicationMessageHelper::IndicationMessageType::CuUp,
-                                              m_forceE2FileLogging,
-                                              m_reducedPmValues);
-
+    (void)plmId;
     // get <rnti, UeManager> map of connected UEs
     auto ueMap = m_rrc->GetUeMap();
     // gNB-wide PDCP volume in downlink
@@ -1661,6 +1685,15 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageCuUp(std::string plmId)
 
         m_drbThrDlUeid[imsi] = rlcBitrate;
 
+        if (m_e2term)
+        {
+            E2UeKpm& ueKpm = m_e2UeKpm[imsi];
+            ueKpm.imsiComplete = ueImsiComplete;
+            ueKpm.txPdcpPduBytesNrRlc = txPdcpPduBytesNrRlc;
+            ueKpm.txPdcpPduNrRlc = txPdcpPduNrRlc;
+            ueKpm.drbThrDlUeid = rlcBitrate;
+        }
+
         NS_LOG_DEBUG(Simulator::Now().GetSeconds()
                      << " " << m_cellId << " cell, connected UE with IMSI " << imsi
                      << " ueImsiString " << ueImsiComplete << " txDlPackets " << txDlPackets
@@ -1671,13 +1704,6 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageCuUp(std::string plmId)
 
         m_e2PdcpStatsCalculator->ResetResultsForImsiLcid(imsi, 3);
 
-        if (!indicationMessageHelper->IsOffline())
-        {
-            indicationMessageHelper->AddCuUpUePmItem(ueImsiComplete,
-                                                     txPdcpPduBytesNrRlc,
-                                                     txPdcpPduNrRlc);
-        }
-
         // TODO enable this back once the reports are fixed
         // uePmString.insert(std::make_pair(imsi,
         //                                  ",,,,,," + std::to_string(txPdcpPduBytesNrRlc) + "," +
@@ -1686,15 +1712,10 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageCuUp(std::string plmId)
                                          ",,,,,,,,,"));
     }
 
-    if (!indicationMessageHelper->IsOffline())
-    {
-        indicationMessageHelper->FillCuUpValues(plmId);
-    }
-
     NS_LOG_DEBUG(Simulator::Now().GetSeconds()
                  << " " << m_cellId << " cell volume mmWave " << cellDlTxVolume);
 
-    if (m_forceE2FileLogging)
+    if (m_enableGymFileLogging && m_sendCuUp)
     {
         std::ofstream csv{};
         csv.open(m_cuUpFileName.c_str(), std::ios_base::app);
@@ -1726,12 +1747,8 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageCuUp(std::string plmId)
             csv << to_print;
         }
         csv.close();
-        return nullptr;
     }
-    else
-    {
-        return indicationMessageHelper->CreateIndicationMessage();
-    }
+    return nullptr;
 }
 
 template <typename A, typename B>
@@ -1779,11 +1796,7 @@ MmWaveEnbNetDevice::ComputeMeanUes(void)
 Ptr<KpmIndicationMessage>
 MmWaveEnbNetDevice::BuildRicIndicationMessageCuCp(std::string plmId)
 {
-    Ptr<MmWaveIndicationMessageHelper> indicationMessageHelper =
-        Create<MmWaveIndicationMessageHelper>(IndicationMessageHelper::IndicationMessageType::CuCp,
-                                              m_forceE2FileLogging,
-                                              m_reducedPmValues);
-
+    (void)plmId;
     auto ueMap = m_rrc->GetUeMap();
     long meanRrcUes = ComputeMeanUes();
 
@@ -1813,14 +1826,16 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageCuCp(std::string plmId)
         double sinrThisCell = 10 * std::log10(m_l3sinrMap[imsi][m_cellId]);
         double convertedSinr = L3RrcMeasurements::ThreeGppMapSinr(sinrThisCell);
 
-        Ptr<L3RrcMeasurements> l3RrcMeasurementServing;
-        if (!indicationMessageHelper->IsOffline())
+        if (m_e2term)
         {
-            l3RrcMeasurementServing =
-                L3RrcMeasurements::CreateL3RrcUeSpecificSinrServing(m_cellId,
-                                                                    m_cellId,
-                                                                    convertedSinr);
+            E2UeKpm& ueKpm = m_e2UeKpm[imsi];
+            ueKpm.imsiComplete = ueImsiComplete;
+            ueKpm.numDrb = numDrb;
+            ueKpm.sinrServ = sinrThisCell;
+            ueKpm.sinrServ3gpp = convertedSinr;
+            ueKpm.servCell = m_cellId;
         }
+
         // NS_LOG_DEBUG(Simulator::Now().GetSeconds()
         //              << " enbdev " << m_cellId << " UE " << imsi << " L3 serving SINR "
         //              << sinrThisCell << " L3 serving SINR 3gpp " << convertedSinr);
@@ -1833,11 +1848,6 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageCuCp(std::string plmId)
         // TODO create double map, imsi -> cell -> sinr
         // TODO store at most 8 reports for each UE, as per the standard
 
-        Ptr<L3RrcMeasurements> l3RrcMeasurementNeigh;
-        if (!indicationMessageHelper->IsOffline())
-        {
-            l3RrcMeasurementNeigh = L3RrcMeasurements::CreateL3RrcUeSpecificSinrNeigh();
-        }
         double sinr;
         std::string neighStr;
 
@@ -1862,9 +1872,12 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageCuCp(std::string plmId)
             {
                 sinr = 10 * std::log10(it->first); // now SINR is a key due to the sort of the map
                 convertedSinr = L3RrcMeasurements::ThreeGppMapSinr(sinr);
-                if (!indicationMessageHelper->IsOffline())
+                if (m_e2term && itIndex < E2SM_REPORT_MAX_NEIGH)
                 {
-                    l3RrcMeasurementNeigh->AddNeighbourCellMeasurement(cellId, convertedSinr);
+                    E2UeKpm& ueKpm = m_e2UeKpm[imsi];
+                    ueKpm.neighId[itIndex] = cellId;
+                    ueKpm.neighSinr[itIndex] = sinr;
+                    ueKpm.neighSinr3gpp[itIndex] = convertedSinr;
                 }
                 NS_LOG_DEBUG(Simulator::Now().GetSeconds()
                              << " enbdev " << m_cellId << " UE " << imsi << " L3 neigh " << cellId
@@ -1881,24 +1894,9 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageCuCp(std::string plmId)
         }
 
         uePmString.insert(std::make_pair(imsi, servingStr + neighStr));
-
-        if (!indicationMessageHelper->IsOffline())
-        {
-            indicationMessageHelper->AddCuCpUePmItem(ueImsiComplete,
-                                                     numDrb,
-                                                     0,
-                                                     l3RrcMeasurementServing,
-                                                     l3RrcMeasurementNeigh);
-        }
     }
 
-    if (!indicationMessageHelper->IsOffline())
-    {
-        // Fill CuCp specific fields
-        indicationMessageHelper->FillCuCpValues(ueMap.size()); // Number of Active UEs
-    }
-
-    if (m_forceE2FileLogging)
+    if (m_enableGymFileLogging && m_sendCuCp)
     {
         std::ofstream csv{};
         csv.open(m_cuCpFileName.c_str(), std::ios_base::app);
@@ -1933,12 +1931,8 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageCuCp(std::string plmId)
             csv << to_print;
         }
         csv.close();
-        return nullptr;
     }
-    else
-    {
-        return indicationMessageHelper->CreateIndicationMessage();
-    }
+    return nullptr;
 }
 
 uint32_t
@@ -1965,11 +1959,6 @@ MmWaveEnbNetDevice::GetRlcBufferOccupancy(Ptr<LteRlc> rlc) const
 Ptr<KpmIndicationMessage>
 MmWaveEnbNetDevice::BuildRicIndicationMessageDu(std::string plmId, uint16_t nrCellId)
 {
-    Ptr<MmWaveIndicationMessageHelper> indicationMessageHelper =
-        Create<MmWaveIndicationMessageHelper>(IndicationMessageHelper::IndicationMessageType::Du,
-                                              m_forceE2FileLogging,
-                                              m_reducedPmValues);
-
     auto ueMap = m_rrc->GetUeMap();
 
     uint32_t macPduCellSpecific = 0;
@@ -2143,32 +2132,33 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageDu(std::string plmId, uint16_t nrCe
         double drbThrDlUeid =
             m_drbThrDlUeid.find(imsi) != m_drbThrDlUeid.end() ? m_drbThrDlUeid.at(imsi) : 0;
 
-        if (!indicationMessageHelper->IsOffline())
+        if (m_e2term)
         {
-            indicationMessageHelper->AddDuUePmItem(ueImsiComplete,
-                                                   macPduUe,
-                                                   macPduInitialUe,
-                                                   macQpsk,
-                                                   mac16Qam,
-                                                   mac64Qam,
-                                                   macRetx,
-                                                   macVolume,
-                                                   macPrb,
-                                                   macMac04,
-                                                   macMac59,
-                                                   macMac1014,
-                                                   macMac1519,
-                                                   macMac2024,
-                                                   macMac2529,
-                                                   macSinrBin1,
-                                                   macSinrBin2,
-                                                   macSinrBin3,
-                                                   macSinrBin4,
-                                                   macSinrBin5,
-                                                   macSinrBin6,
-                                                   macSinrBin7,
-                                                   rlcBufferOccup,
-                                                   drbThrDlUeid);
+            E2UeKpm& ueKpm = m_e2UeKpm[imsi];
+            ueKpm.imsiComplete = ueImsiComplete;
+            ueKpm.macPduUe = macPduUe;
+            ueKpm.macPduInitialUe = macPduInitialUe;
+            ueKpm.macQpsk = macQpsk;
+            ueKpm.mac16Qam = mac16Qam;
+            ueKpm.mac64Qam = mac64Qam;
+            ueKpm.macRetx = macRetx;
+            ueKpm.macVolume = macVolume;
+            ueKpm.macPrb = macPrb;
+            ueKpm.macMac04 = macMac04;
+            ueKpm.macMac59 = macMac59;
+            ueKpm.macMac1014 = macMac1014;
+            ueKpm.macMac1519 = macMac1519;
+            ueKpm.macMac2024 = macMac2024;
+            ueKpm.macMac2529 = macMac2529;
+            ueKpm.macSinrBin1 = macSinrBin1;
+            ueKpm.macSinrBin2 = macSinrBin2;
+            ueKpm.macSinrBin3 = macSinrBin3;
+            ueKpm.macSinrBin4 = macSinrBin4;
+            ueKpm.macSinrBin5 = macSinrBin5;
+            ueKpm.macSinrBin6 = macSinrBin6;
+            ueKpm.macSinrBin7 = macSinrBin7;
+            ueKpm.rlcBufferOccup = rlcBufferOccup;
+            ueKpm.drbThrDlUeid = drbThrDlUeid;
         }
 
         uePmStringDu.insert(std::make_pair(
@@ -2223,55 +2213,54 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageDu(std::string plmId, uint16_t nrCe
                                (long)100); // percentage of used PRBs
     long ulPrbUsage = 0;                   // TODO for future implementation
 
-    if (!indicationMessageHelper->IsOffline())
+    double asmPowerW = 0.0;
+    double asmEnergyJ = 0.0;
+    if ((m_enableGymFileLogging && m_sendDu) || m_e2term)
     {
-        indicationMessageHelper->AddDuCellPmItem(macPduCellSpecific,
-                                                 macPduInitialCellSpecific,
-                                                 macQpskCellSpecific,
-                                                 mac16QamCellSpecific,
-                                                 mac64QamCellSpecific,
-                                                 prbUtilizationDl,
-                                                 macRetxCellSpecific,
-                                                 macVolumeCellSpecific,
-                                                 macMac04CellSpecific,
-                                                 macMac59CellSpecific,
-                                                 macMac1014CellSpecific,
-                                                 macMac1519CellSpecific,
-                                                 macMac2024CellSpecific,
-                                                 macMac2529CellSpecific,
-                                                 macSinrBin1CellSpecific,
-                                                 macSinrBin2CellSpecific,
-                                                 macSinrBin3CellSpecific,
-                                                 macSinrBin4CellSpecific,
-                                                 macSinrBin5CellSpecific,
-                                                 macSinrBin6CellSpecific,
-                                                 macSinrBin7CellSpecific,
-                                                 rlcBufferOccupCellSpecific,
-                                                 ueMap.size());
-
-        Ptr<CellResourceReport> cellResRep = Create<CellResourceReport>();
-        cellResRep->m_plmId = plmId;
-        cellResRep->m_nrCellId = nrCellId;
-        cellResRep->dlAvailablePrbs = dlAvailablePrbs;
-        cellResRep->ulAvailablePrbs = ulAvailablePrbs;
-
-        Ptr<ServedPlmnPerCell> servedPlmnPerCell = Create<ServedPlmnPerCell>();
-        servedPlmnPerCell->m_plmId = plmId;
-        servedPlmnPerCell->m_nrCellId = nrCellId;
-
-        Ptr<EpcDuPmContainer> epcDuVal = Create<EpcDuPmContainer>();
-        epcDuVal->m_qci = qci;
-        epcDuVal->m_dlPrbUsage = dlPrbUsage;
-        epcDuVal->m_ulPrbUsage = ulPrbUsage;
-
-        servedPlmnPerCell->m_perQciReportItems.insert(epcDuVal);
-        cellResRep->m_servedPlmnPerCellItems.insert(servedPlmnPerCell);
-
-        indicationMessageHelper->AddDuCellResRepPmItem(cellResRep);
-        indicationMessageHelper->FillDuValues(plmId + std::to_string(nrCellId));
+        asmPowerW = ConsumeAveragePowerW(m_e2Periodicity);
+        asmEnergyJ = asmPowerW * m_e2Periodicity;
+    }
+    if (m_e2term)
+    {
+        m_e2CellValid = true;
+        m_e2CellId = nrCellId;
+        m_e2NumActiveUes = static_cast<uint16_t>(ueMap.size());
+        m_e2MacPdu = macPduCellSpecific;
+        m_e2MacPduInitial = macPduInitialCellSpecific;
+        m_e2MacQpsk = macQpskCellSpecific;
+        m_e2Mac16Qam = mac16QamCellSpecific;
+        m_e2Mac64Qam = mac64QamCellSpecific;
+        m_e2PrbUtilizationDl = prbUtilizationDl;
+        m_e2MacRetx = macRetxCellSpecific;
+        m_e2MacVolume = macVolumeCellSpecific;
+        m_e2MacMac04 = macMac04CellSpecific;
+        m_e2MacMac59 = macMac59CellSpecific;
+        m_e2MacMac1014 = macMac1014CellSpecific;
+        m_e2MacMac1519 = macMac1519CellSpecific;
+        m_e2MacMac2024 = macMac2024CellSpecific;
+        m_e2MacMac2529 = macMac2529CellSpecific;
+        m_e2SinrBin1 = macSinrBin1CellSpecific;
+        m_e2SinrBin2 = macSinrBin2CellSpecific;
+        m_e2SinrBin3 = macSinrBin3CellSpecific;
+        m_e2SinrBin4 = macSinrBin4CellSpecific;
+        m_e2SinrBin5 = macSinrBin5CellSpecific;
+        m_e2SinrBin6 = macSinrBin6CellSpecific;
+        m_e2SinrBin7 = macSinrBin7CellSpecific;
+        m_e2RlcBuffer = rlcBufferOccupCellSpecific;
+        m_e2ActiveUeDl = ueMap.size();
+        m_e2DlAvailablePrbs = dlAvailablePrbs;
+        m_e2UlAvailablePrbs = ulAvailablePrbs;
+        m_e2Qci = qci;
+        m_e2DlPrbUsage = dlPrbUsage;
+        m_e2UlPrbUsage = ulPrbUsage;
+        m_e2AsmMode = GetAsmMode();
+        m_e2AsmPhase = GetAsmPhase();
+        m_e2AsmTarget = GetAsmTarget();
+        m_e2AsmPowerW = asmPowerW;
+        m_e2AsmEnergyJ = asmEnergyJ;
     }
 
-    if (m_forceE2FileLogging)
+    if (m_enableGymFileLogging && m_sendDu)
     {
         std::ofstream csv{};
         csv.open(m_duFileName.c_str(), std::ios_base::app);
@@ -2281,7 +2270,6 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageDu(std::string plmId, uint16_t nrCe
         }
 
         uint64_t timestamp = m_startTime + Simulator::Now().GetMilliSeconds();
-        double asmPowerW = ConsumeAveragePowerW(m_e2Periodicity);
         std::string asmKpm = std::to_string(static_cast<unsigned>(GetAsmMode())) + "," +
                              std::to_string(static_cast<unsigned>(GetAsmPhase())) + "," +
                              std::to_string(static_cast<unsigned>(GetAsmTarget())) + "," +
@@ -2358,117 +2346,198 @@ MmWaveEnbNetDevice::BuildRicIndicationMessageDu(std::string plmId, uint16_t nrCe
                 << asmKpm << "\n";
         }
         csv.close();
-
-        return nullptr;
     }
-    else
+    return nullptr;
+}
+
+void
+MmWaveEnbNetDevice::SendGnbE2Reports(std::string plmId, std::string gnbId)
+{
+    if (!m_e2term || !m_e2Subscribed)
     {
-        return indicationMessageHelper->CreateIndicationMessage();
+        return;
+    }
+
+    auto sendIndication = [&](Ptr<KpmIndicationMessage> msg) {
+        if (!msg || !msg->m_buffer)
+        {
+            return;
+        }
+        Ptr<KpmIndicationHeader> header = BuildRicIndicationHeader(plmId, gnbId, m_cellId);
+        if (!header)
+        {
+            return;
+        }
+        E2AP_PDU* pdu = (E2AP_PDU*)calloc(1, sizeof(E2AP_PDU));
+        encoding::generate_e2apv1_indication_request_parameterized(
+            pdu,
+            m_e2ReportParams.requestorId,
+            m_e2ReportParams.instanceId,
+            m_e2ReportParams.ranFuncionId,
+            m_e2ReportParams.actionId,
+            1,
+            (uint8_t*)header->m_buffer,
+            header->m_size,
+            (uint8_t*)msg->m_buffer,
+            msg->m_size);
+        m_e2term->SendE2Message(pdu);
+    };
+
+    if (!m_e2UeKpm.empty())
+    {
+        Ptr<MmWaveIndicationMessageHelper> ueHelper = Create<MmWaveIndicationMessageHelper>(
+            IndicationMessageHelper::IndicationMessageType::gNB,
+            false,
+            m_reducedPmValues);
+        for (auto& item : m_e2UeKpm)
+        {
+            const E2UeKpm& ue = item.second;
+            ueHelper->AddgNBUeItem(ue.imsiComplete,
+                                   ue.numDrb,
+                                   0,
+                                   ue.txPdcpPduBytesNrRlc,
+                                   ue.txPdcpPduNrRlc,
+                                   ue.macPduUe,
+                                   ue.macPduInitialUe,
+                                   ue.macQpsk,
+                                   ue.mac16Qam,
+                                   ue.mac64Qam,
+                                   ue.macRetx,
+                                   ue.macVolume,
+                                   static_cast<long>(std::ceil(ue.macPrb)),
+                                   ue.macMac04,
+                                   ue.macMac59,
+                                   ue.macMac1014,
+                                   ue.macMac1519,
+                                   ue.macMac2024,
+                                   ue.macMac2529,
+                                   ue.macSinrBin1,
+                                   ue.macSinrBin2,
+                                   ue.macSinrBin3,
+                                   ue.macSinrBin4,
+                                   ue.macSinrBin5,
+                                   ue.macSinrBin6,
+                                   ue.macSinrBin7,
+                                   ue.rlcBufferOccup,
+                                   ue.drbThrDlUeid,
+                                   ue.sinrServ,
+                                   ue.sinrServ3gpp,
+                                   ue.servCell,
+                                   ue.neighSinr[0],
+                                   ue.neighSinr3gpp[0],
+                                   ue.neighId[0],
+                                   ue.neighSinr[1],
+                                   ue.neighSinr3gpp[1],
+                                   ue.neighId[1],
+                                   ue.neighSinr[2],
+                                   ue.neighSinr3gpp[2],
+                                   ue.neighId[2],
+                                   ue.neighSinr[3],
+                                   ue.neighSinr3gpp[3],
+                                   ue.neighId[3],
+                                   ue.neighSinr[4],
+                                   ue.neighSinr3gpp[4],
+                                   ue.neighId[4],
+                                   ue.neighSinr[5],
+                                   ue.neighSinr3gpp[5],
+                                   ue.neighId[5],
+                                   ue.neighSinr[6],
+                                   ue.neighSinr3gpp[6],
+                                   ue.neighId[6],
+                                   ue.neighSinr[7],
+                                   ue.neighSinr3gpp[7],
+                                   ue.neighId[7]);
+        }
+        sendIndication(ueHelper->CreateIndicationMessage("ue"));
+    }
+
+    if (m_e2CellValid)
+    {
+        Ptr<MmWaveIndicationMessageHelper> cellHelper = Create<MmWaveIndicationMessageHelper>(
+            IndicationMessageHelper::IndicationMessageType::gNB,
+            false,
+            m_reducedPmValues);
+        cellHelper->AddgNBCellItem(m_e2CellId,
+                                   m_e2NumActiveUes,
+                                   m_e2MacPdu,
+                                   m_e2MacPduInitial,
+                                   m_e2MacQpsk,
+                                   m_e2Mac16Qam,
+                                   m_e2Mac64Qam,
+                                   m_e2PrbUtilizationDl,
+                                   m_e2MacRetx,
+                                   m_e2MacVolume,
+                                   m_e2MacMac04,
+                                   m_e2MacMac59,
+                                   m_e2MacMac1014,
+                                   m_e2MacMac1519,
+                                   m_e2MacMac2024,
+                                   m_e2MacMac2529,
+                                   m_e2SinrBin1,
+                                   m_e2SinrBin2,
+                                   m_e2SinrBin3,
+                                   m_e2SinrBin4,
+                                   m_e2SinrBin5,
+                                   m_e2SinrBin6,
+                                   m_e2SinrBin7,
+                                   m_e2RlcBuffer,
+                                   m_e2ActiveUeDl,
+                                   m_e2DlAvailablePrbs,
+                                   m_e2UlAvailablePrbs,
+                                   m_e2Qci,
+                                   m_e2DlPrbUsage,
+                                   m_e2UlPrbUsage,
+                                   m_e2AsmMode,
+                                   m_e2AsmPhase,
+                                   m_e2AsmTarget,
+                                   m_e2AsmPowerW,
+                                   m_e2AsmEnergyJ);
+        sendIndication(cellHelper->CreateIndicationMessage("cell"));
     }
 }
 
 void
 MmWaveEnbNetDevice::BuildAndSendReportMessage(E2Termination::RicSubscriptionRequest_rval_s params)
 {
+    (void)params;
     std::string plmId = "111";
     std::string gnbId = std::to_string(m_cellId);
 
-    // TODO here we can get something from RRC and onward
     NS_LOG_DEBUG("MmWaveEnbNetDevice " << m_cellId << " BuildAndSendMessage at time "
                                        << Simulator::Now().GetSeconds());
 
-    if (m_sendCuUp)
+    m_e2UeKpm.clear();
+    m_e2CellValid = false;
+
+    if (m_sendCuUp || m_e2term)
     {
-        // Create CU-UP
-        Ptr<KpmIndicationHeader> header = BuildRicIndicationHeader(plmId, gnbId, m_cellId);
-        Ptr<KpmIndicationMessage> cuUpMsg = BuildRicIndicationMessageCuUp(plmId);
-
-        // Send CU-UP only if offline logging is disabled
-        if (!m_forceE2FileLogging && header != nullptr && cuUpMsg != nullptr)
-        {
-            NS_LOG_DEBUG("Send NR CU-UP");
-            E2AP_PDU* pdu_cuup_ue = new E2AP_PDU;
-            encoding::generate_e2apv1_indication_request_parameterized(
-                pdu_cuup_ue,
-                params.requestorId,
-                params.instanceId,
-                params.ranFuncionId,
-                params.actionId,
-                1,                           // TODO sequence number
-                (uint8_t*)header->m_buffer,  // buffer containing the encoded header
-                header->m_size,              // size of the encoded header
-                (uint8_t*)cuUpMsg->m_buffer, // buffer containing the encoded message
-                cuUpMsg->m_size);            // size of the encoded message
-            m_e2term->SendE2Message(pdu_cuup_ue);
-            delete pdu_cuup_ue;
-        }
+        BuildRicIndicationMessageCuUp(plmId);
     }
-
-    if (m_sendCuCp)
+    if (m_sendCuCp || m_e2term)
     {
-        // Create and send CU-CP
-        Ptr<KpmIndicationHeader> header = BuildRicIndicationHeader(plmId, gnbId, m_cellId);
-        Ptr<KpmIndicationMessage> cuCpMsg = BuildRicIndicationMessageCuCp(plmId);
-
-        // Send CU-CP only if offline logging is disabled
-        if (!m_forceE2FileLogging && header != nullptr && cuCpMsg != nullptr)
-        {
-            NS_LOG_DEBUG("Send NR CU-CP");
-            E2AP_PDU* pdu_cucp_ue = new E2AP_PDU;
-            encoding::generate_e2apv1_indication_request_parameterized(
-                pdu_cucp_ue,
-                params.requestorId,
-                params.instanceId,
-                params.ranFuncionId,
-                params.actionId,
-                1,                           // TODO sequence number
-                (uint8_t*)header->m_buffer,  // buffer containing the encoded header
-                header->m_size,              // size of the encoded header
-                (uint8_t*)cuCpMsg->m_buffer, // buffer containing the encoded message
-                cuCpMsg->m_size);            // size of the encoded message
-            m_e2term->SendE2Message(pdu_cucp_ue);
-            delete pdu_cucp_ue;
-        }
+        BuildRicIndicationMessageCuCp(plmId);
     }
-
-    if (m_sendDu)
+    if (m_sendDu || m_e2term)
     {
-        // Create DU
-        Ptr<KpmIndicationHeader> header = BuildRicIndicationHeader(plmId, gnbId, m_cellId);
-        Ptr<KpmIndicationMessage> duMsg = BuildRicIndicationMessageDu(plmId, m_cellId);
-
-        // Send DU only if offline logging is disabled
-        if (!m_forceE2FileLogging && header != nullptr && duMsg != nullptr)
-        {
-            NS_LOG_DEBUG("Send NR DU");
-            E2AP_PDU* pdu_du_ue = new E2AP_PDU;
-            encoding::generate_e2apv1_indication_request_parameterized(
-                pdu_du_ue,
-                params.requestorId,
-                params.instanceId,
-                params.ranFuncionId,
-                params.actionId,
-                1,                          // TODO sequence number
-                (uint8_t*)header->m_buffer, // buffer containing the encoded header
-                header->m_size,             // size of the encoded header
-                (uint8_t*)duMsg->m_buffer,  // buffer containing the encoded message
-                duMsg->m_size);             // size of the encoded message
-            m_e2term->SendE2Message(pdu_du_ue);
-            delete pdu_du_ue;
-        }
+        BuildRicIndicationMessageDu(plmId, m_cellId);
     }
+    SendGnbE2Reports(plmId, gnbId);
 
-    if (!m_forceE2FileLogging)
+    if (m_e2term && !m_enableGymFileLogging)
+    {
         Simulator::ScheduleWithContext(1,
                                        Seconds(m_e2Periodicity),
                                        &MmWaveEnbNetDevice::BuildAndSendReportMessage,
                                        this,
-                                       params);
+                                       m_e2ReportParams);
+    }
     else
+    {
         Simulator::Schedule(Seconds(m_e2Periodicity),
                             &MmWaveEnbNetDevice::BuildAndSendReportMessage,
                             this,
-                            params);
+                            m_e2ReportParams);
+    }
 }
 
 void

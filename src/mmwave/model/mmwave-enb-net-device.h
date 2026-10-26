@@ -46,6 +46,7 @@
 #include <ns3/mmwave-phy-trace.h>
 #include <ns3/oran-interface.h>
 
+#include <atomic>
 #include <map>
 #include <vector>
 
@@ -125,6 +126,8 @@ class MmWaveEnbNetDevice : public MmWaveNetDevice
     void BuildAndSendReportMessage(E2Termination::RicSubscriptionRequest_rval_s params);
 
     void KpmSubscriptionCallback(E2AP_PDU_t* sub_req_pdu);
+
+    bool IsE2Subscribed() const;
 
     static void RecvGymControlReady(Ptr<MmWaveEnbNetDevice> netDev, std::string context);
 
@@ -300,6 +303,7 @@ class MmWaveEnbNetDevice : public MmWaveNetDevice
     Ptr<KpmIndicationMessage> BuildRicIndicationMessageCuUp(std::string plmId);
     Ptr<KpmIndicationMessage> BuildRicIndicationMessageCuCp(std::string plmId);
     Ptr<KpmIndicationMessage> BuildRicIndicationMessageDu(std::string plmId, uint16_t nrCellId);
+    void SendGnbE2Reports(std::string plmId, std::string gnbId);
 
     /**
      * @brief Save at each granularity period of 10 ms the number of UEs connected to the cell
@@ -332,7 +336,84 @@ class MmWaveEnbNetDevice : public MmWaveNetDevice
 
     uint16_t m_basicCellId;
 
-    bool m_forceE2FileLogging; //< if true log PMs to files
+    bool m_enableGymFileLogging; //< if true, write the enabled reports to csv files
+    std::atomic<bool> m_e2Subscribed{false};
+    E2Termination::RicSubscriptionRequest_rval_s m_e2ReportParams{};
+
+    struct E2UeKpm
+    {
+        std::string imsiComplete;
+        long numDrb = 0;
+        long txPdcpPduBytesNrRlc = 0;
+        long txPdcpPduNrRlc = 0;
+        long macPduUe = 0;
+        long macPduInitialUe = 0;
+        long macQpsk = 0;
+        long mac16Qam = 0;
+        long mac64Qam = 0;
+        long macRetx = 0;
+        long macVolume = 0;
+        double macPrb = 0;
+        long macMac04 = 0;
+        long macMac59 = 0;
+        long macMac1014 = 0;
+        long macMac1519 = 0;
+        long macMac2024 = 0;
+        long macMac2529 = 0;
+        long macSinrBin1 = 0;
+        long macSinrBin2 = 0;
+        long macSinrBin3 = 0;
+        long macSinrBin4 = 0;
+        long macSinrBin5 = 0;
+        long macSinrBin6 = 0;
+        long macSinrBin7 = 0;
+        long rlcBufferOccup = 0;
+        double drbThrDlUeid = 0;
+        double sinrServ = 0;
+        double sinrServ3gpp = 0;
+        uint16_t servCell = 0;
+        double neighSinr[8] = {};
+        double neighSinr3gpp[8] = {};
+        uint16_t neighId[8] = {};
+    };
+
+    std::map<uint64_t, E2UeKpm> m_e2UeKpm;
+    bool m_e2CellValid = false;
+    long m_e2CellId = 0;
+    uint16_t m_e2NumActiveUes = 0;
+    long m_e2MacPdu = 0;
+    long m_e2MacPduInitial = 0;
+    long m_e2MacQpsk = 0;
+    long m_e2Mac16Qam = 0;
+    long m_e2Mac64Qam = 0;
+    double m_e2PrbUtilizationDl = 0;
+    long m_e2MacRetx = 0;
+    long m_e2MacVolume = 0;
+    long m_e2MacMac04 = 0;
+    long m_e2MacMac59 = 0;
+    long m_e2MacMac1014 = 0;
+    long m_e2MacMac1519 = 0;
+    long m_e2MacMac2024 = 0;
+    long m_e2MacMac2529 = 0;
+    long m_e2SinrBin1 = 0;
+    long m_e2SinrBin2 = 0;
+    long m_e2SinrBin3 = 0;
+    long m_e2SinrBin4 = 0;
+    long m_e2SinrBin5 = 0;
+    long m_e2SinrBin6 = 0;
+    long m_e2SinrBin7 = 0;
+    long m_e2RlcBuffer = 0;
+    long m_e2ActiveUeDl = 0;
+    long m_e2DlAvailablePrbs = 0;
+    long m_e2UlAvailablePrbs = 0;
+    long m_e2Qci = 1;
+    long m_e2DlPrbUsage = 0;
+    long m_e2UlPrbUsage = 0;
+    long m_e2AsmMode = 0;
+    long m_e2AsmPhase = 0;
+    long m_e2AsmTarget = 0;
+    double m_e2AsmPowerW = 0;
+    double m_e2AsmEnergyJ = 0;
     std::string m_cuUpFileName;
     std::string m_cuCpFileName;
     std::string m_duFileName;

@@ -242,8 +242,8 @@ static ns3::GlobalValue g_e2TermIp ("e2TermIp", "The IP address of the RIC E2 te
                                     ns3::StringValue ("10.244.0.240"), ns3::MakeStringChecker ());
 
 static ns3::GlobalValue
-    g_enableE2FileLogging ("enableE2FileLogging",
-              "If true, generate offline file logging instead of connecting to RIC",
+    g_enableGYMFileLogging ("enableGYMFileLogging",
+              "If true, write cu-up/cu-cp/du csv files for gym and local monitoring",
               ns3::BooleanValue (true), ns3::MakeBooleanChecker ());
 
 static ns3::GlobalValue q_useSemaphores ("useSemaphores", "If true, enables the use of semaphores for external environment control",
@@ -326,8 +326,8 @@ main (int argc, char *argv[])
   std::string handoverMode = stringValue.Get ();
   GlobalValue::GetValueByName ("e2TermIp", stringValue);
   std::string e2TermIp = stringValue.Get ();
-  GlobalValue::GetValueByName ("enableE2FileLogging", booleanValue);
-  bool enableE2FileLogging = booleanValue.Get ();
+  GlobalValue::GetValueByName ("enableGYMFileLogging", booleanValue);
+  bool enableGYMFileLogging = booleanValue.Get ();
   GlobalValue::GetValueByName ("minSpeed", doubleValue);
   double minSpeed = doubleValue.Get ();
   GlobalValue::GetValueByName ("maxSpeed", doubleValue);
@@ -340,7 +340,7 @@ main (int argc, char *argv[])
                                  << " traffic Model " << unsigned (trafficModel)
                                  << " OutageThreshold " << outageThreshold << " HandoverMode "
                                  << handoverMode << " BasicCellId " << basicCellId << " e2TermIp "
-                                 << e2TermIp << " enableE2FileLogging " << enableE2FileLogging
+                                 << e2TermIp << " enableGYMFileLogging " << enableGYMFileLogging
                                  << " minSpeed " << minSpeed << " maxSpeed " << maxSpeed);
 
   GlobalValue::GetValueByName ("e2lteEnabled", booleanValue);
@@ -404,8 +404,8 @@ main (int argc, char *argv[])
   Config::SetDefault ("ns3::MmWaveEnbNetDevice::ReducedPmValues", BooleanValue (reducedPmValues));
   Config::SetDefault ("ns3::LteEnbNetDevice::ReducedPmValues", BooleanValue (reducedPmValues));
 
-  Config::SetDefault ("ns3::LteEnbNetDevice::EnableE2FileLogging", BooleanValue (enableE2FileLogging));
-  Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableE2FileLogging", BooleanValue (enableE2FileLogging));
+  Config::SetDefault ("ns3::LteEnbNetDevice::EnableGYMFileLogging", BooleanValue (enableGYMFileLogging));
+  Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableGYMFileLogging", BooleanValue (enableGYMFileLogging));
 
   Config::SetDefault ("ns3::MmWaveEnbMac::NumberOfRaPreambles", UintegerValue (numberOfRaPreambles));
 

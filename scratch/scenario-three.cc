@@ -30,6 +30,11 @@
 #include "ns3/mmwave-point-to-point-epc-helper.h"
 #include "ns3/lte-helper.h"
 #include "ns3/energy-heuristic.h"
+#include "ns3/lte-enb-net-device.h"
+#include "ns3/mmwave-enb-net-device.h"
+
+#include <chrono>
+#include <thread>
 
 using namespace ns3;
 using namespace mmwave;
@@ -208,20 +213,25 @@ static ns3::GlobalValue g_rlcAmEnabled ("rlcAmEnabled", "If true, use RLC AM, el
 static ns3::GlobalValue g_enableTraces ("enableTraces", "If true, generate ns-3 traces",
                                         ns3::BooleanValue (true), ns3::MakeBooleanChecker ());
                                                                                 
-static ns3::GlobalValue g_e2lteEnabled ("e2lteEnabled", "If true, send LTE E2 reports",
+static ns3::GlobalValue g_e2lteEnabled ("e2lteEnabled",
+                                        "If true, connect LTE eNBs to the RIC and send E2 KPM reports",
                                         ns3::BooleanValue (true), ns3::MakeBooleanChecker ());
 
-static ns3::GlobalValue g_e2nrEnabled ("e2nrEnabled", "If false, send NR E2 reports",
-                                        ns3::BooleanValue (true), ns3::MakeBooleanChecker ());
+static ns3::GlobalValue g_e2nrEnabled ("e2nrEnabled",
+                                       "If true, connect NR gNBs to the RIC and send E2 KPM reports",
+                                       ns3::BooleanValue (true), ns3::MakeBooleanChecker ());
 
-static ns3::GlobalValue g_e2du ("e2du", "If true, send DU reports",
-                                        ns3::BooleanValue (true), ns3::MakeBooleanChecker ());
+static ns3::GlobalValue g_e2du ("e2du",
+                                "If true, include the DU report",
+                                ns3::BooleanValue (true), ns3::MakeBooleanChecker ());
 
-static ns3::GlobalValue g_e2cuUp ("e2cuUp", "If true, send CU-UP reports",
-                                        ns3::BooleanValue (true), ns3::MakeBooleanChecker ());
+static ns3::GlobalValue g_e2cuUp ("e2cuUp",
+                                  "If true, include the CU-UP report",
+                                  ns3::BooleanValue (true), ns3::MakeBooleanChecker ());
 
-static ns3::GlobalValue g_e2cuCp ("e2cuCp", "If true, send CU-CP reports",
-                                        ns3::BooleanValue (true), ns3::MakeBooleanChecker ());
+static ns3::GlobalValue g_e2cuCp ("e2cuCp",
+                                  "If true, include the CU-CP report",
+                                  ns3::BooleanValue (true), ns3::MakeBooleanChecker ());
 
 static ns3::GlobalValue g_trafficModel (
     "trafficModel",
@@ -263,7 +273,7 @@ static ns3::GlobalValue g_simTime ("simTime", "Simulation time in seconds", ns3:
                                    ns3::MakeDoubleChecker<double> (0.1, 1000.0));
 
 static ns3::GlobalValue g_reducedPmValues ("reducedPmValues", "If true, use a subset of the the pm containers",
-                                        ns3::BooleanValue (true), ns3::MakeBooleanChecker ());
+                                        ns3::BooleanValue (false), ns3::MakeBooleanChecker ());
 
 static ns3::GlobalValue g_outageThreshold ("outageThreshold",
                                            "SNR threshold for outage events [dB]",
@@ -288,8 +298,8 @@ static ns3::GlobalValue g_e2TermIp ("e2TermIp", "The IP address of the RIC E2 te
                                     ns3::StringValue ("10.244.0.240"), ns3::MakeStringChecker ());
 
 static ns3::GlobalValue
-    g_enableE2FileLogging ("enableE2FileLogging",
-              "If true, generate offline file logging instead of connecting to RIC",
+    g_enableGYMFileLogging ("enableGYMFileLogging",
+              "If true, write the enabled CU-UP, CU-CP, and DU reports to csv files",
               ns3::BooleanValue (true), ns3::MakeBooleanChecker ());
 
 static ns3::GlobalValue g_controlFileName ("controlFileName", "The path to the control file (can be absolute)",
@@ -435,8 +445,8 @@ main (int argc, char *argv[])
   std::string handoverMode = stringValue.Get ();
   GlobalValue::GetValueByName ("e2TermIp", stringValue);
   std::string e2TermIp = stringValue.Get ();
-  GlobalValue::GetValueByName ("enableE2FileLogging", booleanValue);
-  bool enableE2FileLogging = booleanValue.Get ();
+  GlobalValue::GetValueByName ("enableGYMFileLogging", booleanValue);
+  bool enableGYMFileLogging = booleanValue.Get ();
   GlobalValue::GetValueByName ("minSpeed", doubleValue);
   double minSpeed = doubleValue.Get ();
   GlobalValue::GetValueByName ("maxSpeed", doubleValue);
@@ -471,7 +481,7 @@ main (int argc, char *argv[])
                                  << " traffic Model " << unsigned (trafficModel)
                                  << " OutageThreshold " << outageThreshold << " HandoverMode "
                                  << handoverMode << " BasicCellId " << basicCellId << " e2TermIp "
-                                 << e2TermIp << " enableE2FileLogging " << enableE2FileLogging
+                                 << e2TermIp << " enableGYMFileLogging " << enableGYMFileLogging
                                  << " minSpeed " << minSpeed << " maxSpeed " << maxSpeed);
 
   GlobalValue::GetValueByName ("e2lteEnabled", booleanValue);
@@ -534,8 +544,8 @@ main (int argc, char *argv[])
   Config::SetDefault ("ns3::MmWaveEnbNetDevice::ReducedPmValues", BooleanValue (reducedPmValues));
   Config::SetDefault ("ns3::LteEnbNetDevice::ReducedPmValues", BooleanValue (reducedPmValues));
 
-  Config::SetDefault ("ns3::LteEnbNetDevice::EnableE2FileLogging", BooleanValue (enableE2FileLogging));
-  Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableE2FileLogging", BooleanValue (enableE2FileLogging));
+  Config::SetDefault ("ns3::LteEnbNetDevice::EnableGYMFileLogging", BooleanValue (enableGYMFileLogging));
+  Config::SetDefault ("ns3::MmWaveEnbNetDevice::EnableGYMFileLogging", BooleanValue (enableGYMFileLogging));
 
   Config::SetDefault ("ns3::MmWaveEnbMac::NumberOfRaPreambles", UintegerValue (numberOfRaPreambles));
 
@@ -634,7 +644,7 @@ main (int argc, char *argv[])
   Ptr<MmWavePointToPointEpcHelper> epcHelper = CreateObject<MmWavePointToPointEpcHelper> ();
   mmwaveHelper->SetEpcHelper (epcHelper);
 
-  uint8_t nMmWaveEnbNodes = 7;
+  uint8_t nMmWaveEnbNodes = 1;
   uint8_t nLteEnbNodes = 1;
   GlobalValue::GetValueByName ("ues", uintegerValue);
   uint32_t ues = uintegerValue.Get ();
@@ -752,7 +762,7 @@ main (int argc, char *argv[])
       {
           NS_FATAL_ERROR("nBsNoUesAlloc not correct for selected positionAllocator " << nBsNoUesAlloc << positionAllocator);
       }
-      Vector bsCoords[7] = {};
+      Vector bsCoords[1] = {};
       // save vector coords into an array to shuffle them (without the first LTE BS coordinates)
       enbPositionAlloc->GetNext();
       for (int i = 0; i < nMmWaveEnbNodes; i++)
@@ -761,15 +771,15 @@ main (int argc, char *argv[])
       }
       std::srand(std::time(0));
       std::random_shuffle(std::begin(bsCoords), std::end(bsCoords));
-      for (int i = 0; i < 7; i++)
+      for (int i = 0; i < nMmWaveEnbNodes; i++)
       {
           NS_LOG_UNCOND(bsCoords[i]);
       }
 
-      // choose firsts 7-nBsNoUesAlloc BS coordinates 
-      int nodeGroupSize = nUeNodes / (7 - nBsNoUesAlloc);
-      int nodeGroupSizeRest = nUeNodes % (7 - nBsNoUesAlloc);
-      for (int bsCoordIndex = 0; bsCoordIndex < 7 - nBsNoUesAlloc; bsCoordIndex++)
+      // choose firsts nMmWaveEnbNodes-nBsNoUesAlloc BS coordinates
+      int nodeGroupSize = nUeNodes / (nMmWaveEnbNodes - nBsNoUesAlloc);
+      int nodeGroupSizeRest = nUeNodes % (nMmWaveEnbNodes - nBsNoUesAlloc);
+      for (int bsCoordIndex = 0; bsCoordIndex < nMmWaveEnbNodes - nBsNoUesAlloc; bsCoordIndex++)
       {
           // set disc allocator on BS coordinate(isd = isd /2)
           uePositionAlloc->SetX(bsCoords[bsCoordIndex].x);
@@ -1126,6 +1136,53 @@ main (int argc, char *argv[])
   if (run)
     {
       NS_LOG_UNCOND ("Simulation time is " << simTime << " seconds ");
+      if (e2lteEnabled || e2nrEnabled)
+        {
+          NS_LOG_UNCOND ("E2 setup only. Experiment clock stays stopped until every KPM "
+                         "subscription arrives. Restart kpimon-go on the RIC.");
+          Simulator::Stop (MicroSeconds (1));
+          Simulator::Run ();
+
+          while (true)
+            {
+              int expected = 0;
+              int subscribed = 0;
+              for (uint32_t i = 0; i < lteEnbDevs.GetN (); ++i)
+                {
+                  Ptr<LteEnbNetDevice> dev = DynamicCast<LteEnbNetDevice> (lteEnbDevs.Get (i));
+                  if (dev && dev->GetE2Termination ())
+                    {
+                      ++expected;
+                      if (dev->IsE2Subscribed ())
+                        {
+                          ++subscribed;
+                        }
+                    }
+                }
+              for (uint32_t i = 0; i < mmWaveEnbDevs.GetN (); ++i)
+                {
+                  Ptr<MmWaveEnbNetDevice> dev =
+                      DynamicCast<MmWaveEnbNetDevice> (mmWaveEnbDevs.Get (i));
+                  if (dev && dev->GetE2Termination ())
+                    {
+                      ++expected;
+                      if (dev->IsE2Subscribed ())
+                        {
+                          ++subscribed;
+                        }
+                    }
+                }
+              if (expected == 0 || subscribed >= expected)
+                {
+                  NS_LOG_UNCOND ("KPM subscription " << subscribed << "/" << expected
+                                                     << ". Starting the experiment.");
+                  break;
+                }
+              NS_LOG_UNCOND ("Waiting for KPM subscription " << subscribed << "/" << expected
+                                                             << ". Restart kpimon-go on the RIC.");
+              std::this_thread::sleep_for (std::chrono::seconds (2));
+            }
+        }
       Simulator::Stop (Seconds (simTime));
       NS_LOG_INFO ("Run Simulation.");
       Simulator::Run ();
